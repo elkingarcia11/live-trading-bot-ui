@@ -132,11 +132,12 @@ def has_ohlcv(symbol: str, timeframe: str) -> bool:
     return bool(list_parquet_objects(symbol, timeframe))
 
 
-def fingerprint(symbol: str, timeframe: str) -> str:
-    if has_ohlcv(symbol, timeframe):
-        objects = list_parquet_objects(symbol, timeframe)
-    else:
+def fingerprint(symbol: str, timeframe: str, source: str | None = None) -> str:
+    use_trades = source == "trades" or (source != "ohlcv" and not has_ohlcv(symbol, timeframe))
+    if use_trades:
         objects = list_trade_objects(symbol)
+    else:
+        objects = list_parquet_objects(symbol, timeframe)
     if not objects:
         return ""
     return "|".join(f"{item.name}:{item.generation}" for item in objects)
@@ -276,21 +277,31 @@ class OhlcvStore:
         timeframe: str,
         refresh: bool = False,
         progress: ProgressClock | None = None,
+        source: str | None = None,
     ) -> CacheEntry:
         clock = progress or ProgressClock(timeframe=timeframe)
         clock.timeframe = timeframe
         clock.emit(1, f"Looking up {symbol}/{timeframe}", stage="lookup")
-        if has_ohlcv(symbol, timeframe):
-            clock.source = "ohlcv"
-            entry = self._get_ohlcv(symbol, timeframe, refresh, clock)
-        else:
+        use_trades = source == "trades" or (
+            source != "ohlcv" and not has_ohlcv(symbol, timeframe)
+        )
+        if use_trades:
             clock.source = "trades"
             entry = self._get_aggregated(symbol, timeframe, refresh, clock)
+        else:
+            clock.source = "ohlcv"
+            if source == "ohlcv" and not has_ohlcv(symbol, timeframe):
+                raise FileNotFoundError(f"No ohlcv/{symbol}/{timeframe}")
+            entry = self._get_ohlcv(symbol, timeframe, refresh, clock)
         attach_source_mas(entry.frame)
         return entry
 
-    def peek(self, symbol: str, timeframe: str) -> CacheEntry | None:
+    def peek(self, symbol: str, timeframe: str, source: str | None = None) -> CacheEntry | None:
         with self._lock:
+            if source == "trades":
+                return self._agg.get((symbol, timeframe))
+            if source == "ohlcv":
+                return self._ohlcv.get((symbol, timeframe))
             return self._ohlcv.get((symbol, timeframe)) or self._agg.get((symbol, timeframe))
 
     def _get_ohlcv(

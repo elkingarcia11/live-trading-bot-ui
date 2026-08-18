@@ -10,24 +10,46 @@ RTH_START_MIN = 9 * 60 + 30
 RTH_END_MIN = 16 * 60
 
 
+def _et_index(timestamps) -> pd.DatetimeIndex:
+    return pd.DatetimeIndex(pd.to_datetime(timestamps, utc=True)).tz_convert(RTH_TZ)
+
+
+def rth_mask(timestamps) -> np.ndarray:
+    """True when timestamp is in [09:30, 16:00) America/New_York."""
+    idx = _et_index(timestamps)
+    if len(idx) == 0:
+        return np.zeros(0, dtype=bool)
+    minutes = idx.hour.to_numpy() * 60 + idx.minute.to_numpy()
+    return (minutes >= RTH_START_MIN) & (minutes < RTH_END_MIN)
+
+
+def filter_rth(frame: pd.DataFrame, column: str = "timestamp") -> pd.DataFrame:
+    """Keep rows whose timestamp falls in the RTH window."""
+    if frame.empty or column not in frame.columns:
+        return frame
+    mask = rth_mask(frame[column])
+    return frame[mask].reset_index(drop=True)
+
+
+def et_session_key(timestamps) -> np.ndarray:
+    """YYYYMMDD in Eastern, used to keep tick bars inside one RTH session."""
+    idx = _et_index(timestamps)
+    return idx.year.to_numpy() * 10_000 + idx.month.to_numpy() * 100 + idx.day.to_numpy()
+
+
 def session_masks(timestamps) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return (rth, session_open, session_close) bool arrays.
 
     A bar is RTH when its timestamp is in [09:30, 16:00) Eastern.
     session_close is False on the last bar so a live RTH position stays open.
     """
-    idx = pd.DatetimeIndex(pd.to_datetime(timestamps, utc=True)).tz_convert(RTH_TZ)
+    idx = _et_index(timestamps)
     n = len(idx)
     if n == 0:
         empty = np.zeros(0, dtype=bool)
         return empty, empty.copy(), empty.copy()
-    minutes = idx.hour.to_numpy() * 60 + idx.minute.to_numpy()
-    rth = (minutes >= RTH_START_MIN) & (minutes < RTH_END_MIN)
-    dates = (
-        idx.year.to_numpy() * 10_000
-        + idx.month.to_numpy() * 100
-        + idx.day.to_numpy()
-    )
+    rth = rth_mask(idx)
+    dates = idx.year.to_numpy() * 10_000 + idx.month.to_numpy() * 100 + idx.day.to_numpy()
     session_open = rth.copy()
     session_open[1:] = rth[1:] & (~rth[:-1] | (dates[1:] != dates[:-1]))
     session_close = np.zeros(n, dtype=bool)

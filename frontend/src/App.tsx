@@ -90,6 +90,7 @@ export default function App() {
   const timeframes = catalog[symbol] ?? [];
   const aggregateSpec = aggregate === "custom" ? customSpec.trim() : aggregate;
   const effectiveTf = aggregateSpec || timeframe;
+  const dataSource = aggregateSpec ? "trades" : "ohlcv";
   const aggregating = Boolean(aggregateSpec) && (status === "loading" || chartProgress != null);
   const last = bars.at(-1) ?? null;
   const labeledBars = useMemo(() => withActions(bars), [bars]);
@@ -146,13 +147,20 @@ export default function App() {
         setChartProgress(null);
       }
       try {
-        const data = await streamChart(nextSymbol, nextTf, nextParams, refresh, (progress) => {
-          if (!trackAgg || requestId !== requestRef.current || optimizingRef.current) return;
-          setChartProgress(progress);
-          if (progress.bars?.length) {
-            setBars((prev) => (progress.append ? [...prev, ...progress.bars!] : progress.bars!));
-          }
-        });
+        const data = await streamChart(
+          nextSymbol,
+          nextTf,
+          nextParams,
+          refresh,
+          (progress) => {
+            if (!trackAgg || requestId !== requestRef.current || optimizingRef.current) return;
+            setChartProgress(progress);
+            if (progress.bars?.length) {
+              setBars((prev) => (progress.append ? [...prev, ...progress.bars!] : progress.bars!));
+            }
+          },
+          dataSource
+        );
         if (requestId !== requestRef.current || optimizingRef.current) return;
         fingerprintRef.current = data.fingerprint;
         setBars(data.bars);
@@ -173,7 +181,7 @@ export default function App() {
         }
       }
     },
-    [symbol, effectiveTf, aggregate]
+    [symbol, effectiveTf, aggregate, dataSource]
   );
 
   const runOptimize = useCallback(
@@ -188,7 +196,7 @@ export default function App() {
       setOptimizeNote(null);
       setOptimizeProgress(null);
       try {
-        const result = await streamOptimize(symbol, effectiveTf, metric, setOptimizeProgress);
+        const result = await streamOptimize(symbol, effectiveTf, metric, setOptimizeProgress, dataSource);
         const nextParams: GmaParams = {
           fastLength: Number(result.params.fast_length),
           fastSigma: Number(result.params.fast_sigma),
@@ -214,7 +222,7 @@ export default function App() {
         optimizingRef.current = false;
       }
     },
-    [symbol, effectiveTf]
+    [symbol, effectiveTf, dataSource]
   );
 
   useEffect(() => {
@@ -238,16 +246,16 @@ export default function App() {
   const pairRef = useRef("");
   useEffect(() => {
     if (optimizingRef.current || !symbol || !effectiveTf) return;
-    const pair = `${symbol}|${effectiveTf}`;
+    const pair = `${symbol}|${effectiveTf}|${dataSource}`;
     const refresh = pairRef.current !== pair;
     pairRef.current = pair;
     if (refresh) setStatus("loading");
     loadChart(refresh, symbol, effectiveTf, params).catch(() => undefined);
-  }, [symbol, effectiveTf, params, loadChart]);
+  }, [symbol, effectiveTf, dataSource, params, loadChart]);
 
   useEffect(() => {
     if (locked || !symbol || !effectiveTf) return;
-    const sourceStream = new EventSource(watchUrl(symbol, effectiveTf));
+    const sourceStream = new EventSource(watchUrl(symbol, effectiveTf, dataSource));
     sourceStream.onmessage = (event) => {
       try {
         const payload = JSON.parse(event.data) as {
@@ -273,7 +281,7 @@ export default function App() {
     };
     const poll = window.setInterval(() => {
       if (optimizingRef.current) return;
-      fetchMeta(symbol, effectiveTf)
+      fetchMeta(symbol, effectiveTf, dataSource)
         .then((meta) => {
           if (
             !optimizingRef.current &&
@@ -289,7 +297,16 @@ export default function App() {
       sourceStream.close();
       window.clearInterval(poll);
     };
-  }, [symbol, effectiveTf, loadChart, locked]);
+  }, [symbol, effectiveTf, dataSource, loadChart, locked]);
+
+  const resetSeriesControls = () => {
+    setDraft(DEFAULT_PARAMS);
+    setParams(DEFAULT_PARAMS);
+    setOptimizeTarget("");
+    setOptimizeNote(null);
+    setCustomDraft("100t");
+    setCustomSpec("100t");
+  };
 
   useEffect(() => {
     if (!locked) return;
@@ -314,7 +331,7 @@ export default function App() {
             value={symbol}
             onChange={(e) => {
               setSymbol(e.target.value);
-              setOptimizeTarget("");
+              resetSeriesControls();
             }}
             disabled={locked || !symbols.length}
           >
@@ -334,6 +351,7 @@ export default function App() {
               const next = e.target.value;
               setTimeframe(next);
               if (next) setAggregate("");
+              resetSeriesControls();
             }}
             disabled={locked || !timeframes.length}
           >
@@ -354,6 +372,7 @@ export default function App() {
               const next = e.target.value;
               setAggregate(next);
               if (next) setTimeframe("");
+              resetSeriesControls();
             }}
             disabled={locked || !hasTrades[symbol]}
           >

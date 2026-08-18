@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 from typing import Literal
-
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
@@ -28,6 +27,8 @@ from backend.aggregate import PRESETS, parse_spec
 from backend.gma import EMA_COL, SMA_COL, dual_gma
 from backend.optimize import optimize as run_optimize
 from backend.session import rth_trade_indices, session_masks
+
+DataSource = Literal["ohlcv", "trades"]
 
 store = OhlcvStore()
 app = FastAPI(title="Live Trading Bot UI", version="1.0.0")
@@ -69,16 +70,17 @@ def _chart_payload(
     params: GmaParams,
     refresh: bool,
     on_progress=None,
+    source: DataSource | None = None,
 ) -> dict:
     clock = ProgressClock(on_progress=on_progress, timeframe=timeframe)
     clock.emit(0, f"Loading {symbol}/{timeframe}", stage="start")
-    try:
-        parse_spec(timeframe)
-    except ValueError as exc:
-        if not has_ohlcv(symbol, timeframe):
+    if source == "trades" or not has_ohlcv(symbol, timeframe):
+        try:
+            parse_spec(timeframe)
+        except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
-        entry = store.get(symbol, timeframe, refresh=refresh, progress=clock)
+        entry = store.get(symbol, timeframe, refresh=refresh, progress=clock, source=source)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -291,18 +293,23 @@ def timeframes(symbol: str = Query(..., min_length=1)) -> dict:
 
 
 @app.get("/api/meta")
-def meta(symbol: str = Query(..., min_length=1), timeframe: str = Query(..., min_length=1)) -> dict:
+def meta(
+    symbol: str = Query(..., min_length=1),
+    timeframe: str = Query(..., min_length=1),
+    source: DataSource | None = None,
+) -> dict:
     try:
-        fp = fingerprint(symbol, timeframe)
+        fp = fingerprint(symbol, timeframe, source)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Failed to stat GCS: {exc}") from exc
-    cached = store.peek(symbol, timeframe)
+    cached = store.peek(symbol, timeframe, source)
     return {
         "symbol": symbol,
         "timeframe": timeframe,
         "fingerprint": fp,
         "cached_fingerprint": cached.fingerprint if cached else None,
         "stale": cached is None or cached.fingerprint != fp,
+        "source": source,
     }
 
 
@@ -312,6 +319,7 @@ async def chart(
     symbol: str = Query(..., min_length=1),
     timeframe: str = Query(..., min_length=1),
     refresh: bool = False,
+    source: DataSource | None = None,
     fast_length: int = Query(20, ge=5, le=100),
     fast_sigma: float = Query(3.0, ge=1, le=10),
     slow_length: int = Query(50, ge=5, le=100),
@@ -326,17 +334,22 @@ async def chart(
     if "text/event-stream" in request.headers.get("accept", ""):
 
         def work(emit) -> None:
-            result = _chart_payload(symbol, timeframe, params, refresh, on_progress=emit)
+            result = _chart_payload(
+                symbol, timeframe, params, refresh, on_progress=emit, source=source
+            )
             emit({"type": "done", "result": result})
 
         return _sse_job(work)
-    return await asyncio.to_thread(_chart_payload, symbol, timeframe, params, refresh)
+    return await asyncio.to_thread(
+        _chart_payload, symbol, timeframe, params, refresh, None, source
+    )
 
 
 @app.post("/api/refresh")
 def refresh(
     symbol: str = Query(..., min_length=1),
     timeframe: str = Query(..., min_length=1),
+    source: DataSource | None = None,
     fast_length: int = Query(20, ge=5, le=100),
     fast_sigma: float = Query(3.0, ge=1, le=10),
     slow_length: int = Query(50, ge=5, le=100),
@@ -348,7 +361,7 @@ def refresh(
         slow_length=slow_length,
         slow_sigma=slow_sigma,
     )
-    return _chart_payload(symbol, timeframe, params, refresh=True)
+    return _chart_payload(symbol, timeframe, params, refresh=True, source=source)
 
 
 @app.get("/api/optimize")
@@ -364,15 +377,17 @@ async def optimize(
     ] = Query(...),
     timeframe: str = Query(..., min_length=1),
     refresh: bool = False,
+    source: DataSource | None = None,
 ):
-    try:
-        parse_spec(timeframe)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if source != "ohlcv":
+        try:
+            parse_spec(timeframe)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def load_series(spec: str):
         try:
-            entry = store.get(symbol, spec, refresh=refresh)
+            entry = store.get(symbol, spec, refresh=refresh, source=source)
         except FileNotFoundError:
             return None
         except Exception as exc:
@@ -409,13 +424,14 @@ async def optimize(
 async def events(
     symbol: str = Query(..., min_length=1),
     timeframe: str = Query(..., min_length=1),
+    source: DataSource | None = None,
 ):
     async def generate():
         last = None
         yield ":" + (" " * 4096) + "\n\n"
         while True:
             try:
-                fp = await asyncio.to_thread(fingerprint, symbol, timeframe)
+                fp = await asyncio.to_thread(fingerprint, symbol, timeframe, source)
             except Exception as exc:
                 payload = {"type": "error", "message": str(exc)}
                 yield f"data: {json.dumps(payload)}\n\n"

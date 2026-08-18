@@ -1,5 +1,7 @@
 import type { CatalogResponse, ChartResponse, GmaParams, LoadProgress, OptimizeMetric, OptimizeProgress } from "./types";
 
+type DataSource = "ohlcv" | "trades";
+
 function query(params: GmaParams): string {
   const q = new URLSearchParams({
     fast_length: String(params.fastLength),
@@ -109,12 +111,14 @@ export function streamChart(
   timeframe: string,
   params: GmaParams,
   refresh: boolean,
-  onProgress: (progress: LoadProgress) => void
+  onProgress: (progress: LoadProgress) => void,
+  source: DataSource
 ): Promise<ChartResponse> {
   const q = new URLSearchParams({
     symbol,
     timeframe,
     refresh: refresh ? "true" : "false",
+    source,
   });
   return streamEvents<ChartResponse, LoadProgress>(
     `/api/chart?${q.toString()}&${query(params)}`,
@@ -122,8 +126,8 @@ export function streamChart(
   );
 }
 
-export function fetchMeta(symbol: string, timeframe: string) {
-  const q = new URLSearchParams({ symbol, timeframe });
+export function fetchMeta(symbol: string, timeframe: string, source: DataSource) {
+  const q = new URLSearchParams({ symbol, timeframe, source });
   return fetch(`/api/meta?${q.toString()}`).then((r) =>
     readJson<{ fingerprint: string; stale: boolean }>(r)
   );
@@ -162,13 +166,14 @@ export async function streamOptimize(
   symbol: string,
   timeframe: string,
   metric: OptimizeMetric,
-  onProgress: (progress: OptimizeProgress) => void
+  onProgress: (progress: OptimizeProgress) => void,
+  source: DataSource
 ) {
-  const q = new URLSearchParams({ symbol, timeframe, metric });
+  const q = new URLSearchParams({ symbol, timeframe, metric, source });
   return streamEvents<OptimizeResult, OptimizeProgress>(`/api/optimize?${q.toString()}`, onProgress);
 }
 
-export function watchUrl(symbol: string, timeframe: string): string {
-  const q = new URLSearchParams({ symbol, timeframe });
+export function watchUrl(symbol: string, timeframe: string, source: DataSource): string {
+  const q = new URLSearchParams({ symbol, timeframe, source });
   return `/api/events?${q.toString()}`;
 }

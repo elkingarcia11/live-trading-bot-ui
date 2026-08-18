@@ -6,6 +6,7 @@ import re
 from typing import Callable
 
 from backend.gma import EMA_COL, SMA_COL, SOURCE_PERIOD, ema, sma
+from backend.session import et_session_key, filter_rth
 import pandas as pd
 
 AggProgressFn = Callable[[str, float], None]
@@ -49,12 +50,17 @@ def aggregate_trades(
     frame = _prepare_trades(trades)
     if frame.empty:
         return _empty_ohlcv()
-    note(f"Prepared {len(frame):,} trades", 0.3)
+    note(f"Prepared {len(frame):,} trades", 0.2)
+    before = len(frame)
+    frame = filter_rth(frame)
+    note(f"RTH 9:30–4:00 ET: {len(frame):,} of {before:,} trades", 0.3)
+    if frame.empty:
+        return _empty_ohlcv()
     if kind == "tick":
-        note(f"Grouping every {size} ticks", 0.4)
+        note(f"Grouping every {size} RTH ticks", 0.4)
         bars = _tick_bars(frame, size)
     else:
-        note(f"Bucketing to {spec}", 0.4)
+        note(f"Bucketing RTH trades to {spec}", 0.4)
         bars = _time_bars(frame, size)
     note(f"Computing source MAs on {len(bars):,} bars", 0.8)
     return attach_source_mas(bars)
@@ -92,7 +98,9 @@ def _prepare_trades(trades: pd.DataFrame) -> pd.DataFrame:
 def _tick_bars(trades: pd.DataFrame, n: int) -> pd.DataFrame:
     if trades.empty:
         return _empty_ohlcv()
-    grouped = trades.assign(_bar=trades.index // n).groupby("_bar", sort=True)
+    session = et_session_key(trades["timestamp"])
+    bar_i = trades.groupby(session, sort=False).cumcount() // n
+    grouped = trades.assign(_session=session, _bar=bar_i).groupby(["_session", "_bar"], sort=True)
     out = grouped.agg(
         timestamp=("timestamp", "first"),
         open=("price", "first"),
