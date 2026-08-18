@@ -30,6 +30,7 @@ export function fetchCatalog(): Promise<CatalogResponse> {
 
 type StreamEvent<T, P extends { type: "progress" } = { type: "progress" }> =
   | P
+  | { type: "ping" }
   | { type: "done"; result: T }
   | { type: "error"; detail: string };
 
@@ -58,6 +59,7 @@ async function streamEvents<T, P extends { type: "progress" }>(
   let buf = "";
 
   const apply = (payload: StreamEvent<T, P>): T | null => {
+    if (payload.type === "ping") return null;
     if (payload.type === "progress") {
       onProgress(payload);
       return null;
@@ -99,7 +101,7 @@ async function streamEvents<T, P extends { type: "progress" }>(
     const result = consume(decoder.decode(value, { stream: true }));
     if (result) return result;
   }
-  throw new Error("Stream ended early");
+  throw new Error("Stream closed before it finished");
 }
 
 export function streamChart(

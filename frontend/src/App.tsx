@@ -556,6 +556,7 @@ export default function App() {
         </section>
         <section className="stats">
           <h2>Session{aggregating && aggregateSpec ? ` · ${aggregateSpec}` : ""}</h2>
+          <p className="hint">Calls/puts 9:30am–4:00pm ET</p>
           {aggregating && (
             <div className="optimize-progress">
               <p className="hint">{sessionProgressLine(chartProgress, aggregateSpec, tradeStats, bars.length)}</p>

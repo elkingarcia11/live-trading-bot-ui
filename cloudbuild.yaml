@@ -39,7 +39,7 @@ steps:
       - --platform=managed
       - --service-account=${_SERVICE_ACCOUNT}
       - --set-env-vars=GCS_BUCKET=live-trading-bot
-      - --memory=1Gi
+      - --memory=2Gi
       - --cpu=1
       - --timeout=3600
       - --allow-unauthenticated

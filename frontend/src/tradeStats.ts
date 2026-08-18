@@ -2,6 +2,43 @@ import type { Action, Bar } from "./types";
 
 export type PositionSide = "long" | "short";
 
+const ET_TZ = "America/New_York";
+const RTH_START_MIN = 9 * 60 + 30;
+const RTH_END_MIN = 16 * 60;
+const ET_FMT = new Intl.DateTimeFormat("en-US", {
+  timeZone: ET_TZ,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+  hourCycle: "h23",
+});
+
+function etClock(unix: number): { date: string; minutes: number } {
+  const parts = ET_FMT.formatToParts(new Date(unix * 1000));
+  const get = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value ?? "0";
+  return {
+    date: `${get("year")}-${get("month")}-${get("day")}`,
+    minutes: Number(get("hour")) * 60 + Number(get("minute")),
+  };
+}
+
+function sessionFlags(bars: Bar[]): { rth: boolean[]; open: boolean[]; close: boolean[] } {
+  const clocks = bars.map((bar) => etClock(bar.time));
+  const rth = clocks.map((clock) => clock.minutes >= RTH_START_MIN && clock.minutes < RTH_END_MIN);
+  const open = rth.map(
+    (inRth, i) => inRth && (i === 0 || !rth[i - 1] || clocks[i].date !== clocks[i - 1].date)
+  );
+  const close = rth.map((inRth, i) => {
+    if (!inRth || i === bars.length - 1) return false;
+    return !rth[i + 1] || clocks[i].date !== clocks[i + 1].date;
+  });
+  return { rth, open, close };
+}
+
 export const ACTION_LABEL: Record<Action, string> = {
   open_call: "▲",
   close_call: "▼",
@@ -69,29 +106,50 @@ function putPct(sellPrice: number, buyPrice: number): number {
   return (putPnl(sellPrice, buyPrice) / sellPrice) * 100;
 }
 
-/** Map GMA buy/sell crosses onto open/close call/put actions. */
+/** Map GMA buy/sell crosses onto open/close call/put actions during RTH only. */
 export function withActions(bars: Bar[]): Bar[] {
+  const flags = sessionFlags(bars);
   let side: PositionSide | null = null;
-  return bars.map((bar) => {
+  return bars.map((bar, i) => {
     const actions: Action[] = [];
-    if (bar.signal === "buy") {
-      if (side === "short") {
-        actions.push("close_put");
-        side = null;
+    const canTrade = flags.rth[i] && !flags.close[i];
+    if (canTrade) {
+      if (bar.signal === "buy") {
+        if (side === "short") {
+          actions.push("close_put");
+          side = null;
+        }
+        if (side == null) {
+          actions.push("open_call");
+          side = "long";
+        }
+      } else if (bar.signal === "sell") {
+        if (side === "long") {
+          actions.push("close_call");
+          side = null;
+        }
+        if (side == null) {
+          actions.push("open_put");
+          side = "short";
+        }
+      } else if (
+        flags.open[i] &&
+        side == null &&
+        bar.gma_fast != null &&
+        bar.gma_slow != null
+      ) {
+        if (bar.gma_fast > bar.gma_slow) {
+          actions.push("open_call");
+          side = "long";
+        } else if (bar.gma_fast < bar.gma_slow) {
+          actions.push("open_put");
+          side = "short";
+        }
       }
-      if (side == null) {
-        actions.push("open_call");
-        side = "long";
-      }
-    } else if (bar.signal === "sell") {
-      if (side === "long") {
-        actions.push("close_call");
-        side = null;
-      }
-      if (side == null) {
-        actions.push("open_put");
-        side = "short";
-      }
+    }
+    if (flags.close[i] && side != null) {
+      actions.push(side === "long" ? "close_call" : "close_put");
+      side = null;
     }
     return { ...bar, actions };
   });

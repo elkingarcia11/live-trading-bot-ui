@@ -13,6 +13,7 @@ from typing import Callable
 import numpy as np
 
 from backend.gma import gaussian_ma
+from backend.session import rth_trade_indices, session_masks
 
 # Length 5–30 every integer; above 30 only multiples of 5. Sigma 1–10 step 0.5.
 # Fast vs slow is length/sigma, not raw length: a valid pair has
@@ -79,19 +80,41 @@ def put_pct(sell_price: float, buy_price: float) -> float:
     return put_pnl(sell_price, buy_price) / sell_price * 100.0
 
 
-def score_events(
-    close: np.ndarray, buy_idx: np.ndarray, sell_idx: np.ndarray
-) -> tuple[int, int, float, float, float, float, int, int, int, int]:
-    """Always in market: GMA up opens/holds a call, GMA down opens/holds a put.
+def _close_put(entry: float, price: float) -> tuple[float, float, bool]:
+    pnl = put_pnl(entry, price)
+    return pnl, put_pct(entry, price), pnl > 0
 
+
+def _close_call(entry: float, price: float) -> tuple[float, float, bool]:
+    pnl = call_pnl(entry, price)
+    return pnl, call_pct(entry, price), pnl > 0
+
+
+def score_events(
+    close: np.ndarray,
+    buy_idx: np.ndarray,
+    sell_idx: np.ndarray,
+    flatten_idx: np.ndarray | None = None,
+) -> tuple[int, int, float, float, float, float, int, int, int, int]:
+    """Always in during RTH: GMA up holds a call, GMA down holds a put.
+
+    Flatten indices close without opening the other side (session close).
     Close call (up = win) and close put (down = win) both count toward
     win rate and combined profit.
     """
+    buy_idx = np.asarray(buy_idx, dtype=np.int64)
+    sell_idx = np.asarray(sell_idx, dtype=np.int64)
+    flatten_idx = np.asarray(
+        np.zeros(0, dtype=np.int64) if flatten_idx is None else flatten_idx,
+        dtype=np.int64,
+    )
     bi = 0
     si = 0
+    fi = 0
     nb = buy_idx.size
     ns = sell_idx.size
-    if nb + ns < 2:
+    nf = flatten_idx.size
+    if nb + ns + nf < 2:
         return 0, 0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0, 0
     entry = 0.0
     side = 0  # 1 = open call, -1 = open put
@@ -104,21 +127,46 @@ def score_events(
     put_pct_sum = 0.0
     close_calls = 0
     close_puts = 0
-    while bi < nb or si < ns:
-        take_buy = si >= ns or (bi < nb and buy_idx[bi] <= sell_idx[si])
-        idx = int(buy_idx[bi] if take_buy else sell_idx[si])
-        if take_buy:
-            bi += 1
-        else:
-            si += 1
+    inf = close.size + 1
+    while bi < nb or si < ns or fi < nf:
+        b = int(buy_idx[bi]) if bi < nb else inf
+        s = int(sell_idx[si]) if si < ns else inf
+        f = int(flatten_idx[fi]) if fi < nf else inf
+        idx = min(b, s, f)
         price = float(close[idx])
-        if take_buy:
-            if side == -1:
-                pnl = put_pnl(entry, price)
+        if f == idx:
+            fi += 1
+            if b == idx:
+                bi += 1
+            if s == idx:
+                si += 1
+            if side == 1:
+                pnl, pct, won = _close_call(entry, price)
+                call_profit += pnl
+                call_pct_sum += pct
+                close_calls += 1
+                if won:
+                    wins += 1
+                    call_wins += 1
+                side = 0
+            elif side == -1:
+                pnl, pct, won = _close_put(entry, price)
                 put_profit += pnl
-                put_pct_sum += put_pct(entry, price)
+                put_pct_sum += pct
                 close_puts += 1
-                if pnl > 0:
+                if won:
+                    wins += 1
+                    put_wins += 1
+                side = 0
+            continue
+        if b == idx:
+            bi += 1
+            if side == -1:
+                pnl, pct, won = _close_put(entry, price)
+                put_profit += pnl
+                put_pct_sum += pct
+                close_puts += 1
+                if won:
                     wins += 1
                     put_wins += 1
                 side = 0
@@ -126,12 +174,13 @@ def score_events(
                 entry = price
                 side = 1
         else:
+            si += 1
             if side == 1:
-                pnl = call_pnl(entry, price)
+                pnl, pct, won = _close_call(entry, price)
                 call_profit += pnl
-                call_pct_sum += call_pct(entry, price)
+                call_pct_sum += pct
                 close_calls += 1
-                if pnl > 0:
+                if won:
                     wins += 1
                     call_wins += 1
                 side = 0
@@ -188,6 +237,9 @@ class FrameSeries:
     close: np.ndarray
     ema: np.ndarray
     sma: np.ndarray
+    rth: np.ndarray
+    session_open: np.ndarray
+    session_close: np.ndarray
 
 
 ProgressFn = Callable[[dict], None]
@@ -220,11 +272,20 @@ def _gma_configs(source: np.ndarray, n: int) -> list[tuple[int, float, np.ndarra
     return configs
 
 
+def _allocated_cpus() -> int:
+    raw = os.environ.get("OPTIMIZE_WORKERS")
+    if raw:
+        return max(1, int(float(raw)))
+    # Cloud Run sets K_SERVICE; os.cpu_count() is the host, not --cpu.
+    if os.environ.get("K_SERVICE"):
+        return 1
+    return os.cpu_count() or 1
+
+
 def _worker_count(tasks: int) -> int:
     if tasks <= 1:
         return 1
-    cpus = os.cpu_count() or 1
-    return max(1, min(8, cpus, tasks))
+    return max(1, min(8, _allocated_cpus(), tasks))
 
 
 def _split(items: list, parts: int) -> list[list]:
@@ -260,7 +321,7 @@ class _TickCounter:
 
 def _search_fast_group(
     timeframe: str,
-    close: np.ndarray,
+    series: FrameSeries,
     n: int,
     metric: str,
     fast_group: list[tuple[int, float, np.ndarray]],
@@ -270,6 +331,7 @@ def _search_fast_group(
     best: Trial | None = None
     tested = 0
     pending = 0
+    close = series.close
     for flen, fsig, fast in fast_group:
         for slen, ssig, slow in slow_configs:
             if not _is_fast_slow(flen, fsig, slen, ssig):
@@ -281,12 +343,10 @@ def _search_fast_group(
                 pending = 0
             if max(flen, slen) + 2 > n:
                 continue
-            f1, f0 = fast[1:], fast[:-1]
-            s1, s0 = slow[1:], slow[:-1]
-            ok = np.isfinite(f1) & np.isfinite(f0) & np.isfinite(s1) & np.isfinite(s0)
-            buy_idx = np.flatnonzero(ok & (f0 <= s0) & (f1 > s1)) + 1
-            sell_idx = np.flatnonzero(ok & (f0 >= s0) & (f1 < s1)) + 1
-            if buy_idx.size + sell_idx.size < MIN_TRADES:
+            buy_idx, sell_idx, flatten_idx = rth_trade_indices(
+                fast, slow, series.rth, series.session_open, series.session_close
+            )
+            if buy_idx.size + sell_idx.size + flatten_idx.size < MIN_TRADES:
                 continue
             (
                 closed,
@@ -299,7 +359,7 @@ def _search_fast_group(
                 n_puts,
                 call_wins,
                 put_wins,
-            ) = score_events(close, buy_idx, sell_idx)
+            ) = score_events(close, buy_idx, sell_idx, flatten_idx)
             if not _enough_trades(metric, n_calls, n_puts, closed):
                 continue
             trial = Trial(
@@ -336,14 +396,21 @@ def search_timeframe(
     series: FrameSeries,
     metric: str,
     on_tick: Callable[[int], None] | None = None,
+    on_ready: Callable[[], None] | None = None,
 ) -> tuple[Trial | None, int]:
     close = series.close
     n = close.size
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        fast_fut = pool.submit(_gma_configs, series.ema, n)
-        slow_fut = pool.submit(_gma_configs, series.sma, n)
-        fast_configs = fast_fut.result()
-        slow_configs = slow_fut.result()
+    if _allocated_cpus() <= 1:
+        fast_configs = _gma_configs(series.ema, n)
+        slow_configs = _gma_configs(series.sma, n)
+    else:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fast_fut = pool.submit(_gma_configs, series.ema, n)
+            slow_fut = pool.submit(_gma_configs, series.sma, n)
+            fast_configs = fast_fut.result()
+            slow_configs = slow_fut.result()
+    if on_ready is not None:
+        on_ready()
 
     workers = _worker_count(len(fast_configs))
     groups = _split(fast_configs, workers)
@@ -353,7 +420,7 @@ def search_timeframe(
     if workers <= 1:
         parts = [
             _search_fast_group(
-                timeframe, close, n, metric, group, slow_configs, ticks
+                timeframe, series, n, metric, group, slow_configs, ticks
             )
             for group in groups
         ]
@@ -363,7 +430,7 @@ def search_timeframe(
                 pool.submit(
                     _search_fast_group,
                     timeframe,
-                    close,
+                    series,
                     n,
                     metric,
                     group,
@@ -415,12 +482,26 @@ def optimize(
         packed = load_series(spec)
         if packed is None:
             continue
-        close, ema_source, sma_source = packed
+        close, ema_source, sma_source, timestamps = packed
         if close is None or close.size < MIN_TRADES + 2:
             continue
         if ema_source is None or sma_source is None:
             continue
-        series = FrameSeries(close=close, ema=ema_source, sma=sma_source)
+        if timestamps is None:
+            n_bars = int(close.size)
+            rth = np.ones(n_bars, dtype=bool)
+            session_open = np.zeros(n_bars, dtype=bool)
+            session_close = np.zeros(n_bars, dtype=bool)
+        else:
+            rth, session_open, session_close = session_masks(timestamps)
+        series = FrameSeries(
+            close=close,
+            ema=ema_source,
+            sma=sma_source,
+            rth=rth,
+            session_open=session_open,
+            session_close=session_close,
+        )
         jobs.append((spec, series, _pair_count(int(close.size))))
 
     work_total = max(sum(pairs for _spec, _series, pairs in jobs), 1)
@@ -453,13 +534,16 @@ def optimize(
 
     for index, (spec, series, _pairs) in enumerate(jobs, start=1):
         frames += 1
-        report(spec, index, 0, f"Searching {spec}")
+        report(spec, index, 0, f"Computing GMA {spec}")
         best, n_tested = search_timeframe(
             spec,
             series,
             metric,
             on_tick=lambda n, spec=spec, index=index: report(
                 spec, index, n, f"Searching {spec}"
+            ),
+            on_ready=lambda spec=spec, index=index: report(
+                spec, index, 0, f"Searching {spec}"
             ),
         )
         tested += n_tested

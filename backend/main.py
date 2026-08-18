@@ -25,8 +25,9 @@ from backend.gcs import (
     list_trade_symbols,
 )
 from backend.aggregate import PRESETS, parse_spec
-from backend.gma import EMA_COL, SMA_COL, detect_crosses, dual_gma
+from backend.gma import EMA_COL, SMA_COL, dual_gma
 from backend.optimize import optimize as run_optimize
+from backend.session import rth_trade_indices, session_masks
 
 store = OhlcvStore()
 app = FastAPI(title="Live Trading Bot UI", version="1.0.0")
@@ -115,7 +116,14 @@ def _chart_payload(
         ema_source=ema_source,
         sma_source=sma_source,
     )
-    buy, sell = detect_crosses(fast, slow)
+    rth, session_open, session_close = session_masks(frame["timestamp"])
+    buy_idx, sell_idx, _flatten_idx = rth_trade_indices(
+        fast, slow, rth, session_open, session_close
+    )
+    buy = np.zeros(len(frame), dtype=bool)
+    sell = np.zeros(len(frame), dtype=bool)
+    buy[buy_idx] = True
+    sell[sell_idx] = True
 
     n = len(frame)
     clock.emit(88, f"Updating session from {n:,} bars", stage="session", done=0, total=n)
@@ -173,6 +181,14 @@ def _chart_payload(
     }
 
 
+SSE_HEADERS = {
+    "Cache-Control": "no-cache, no-store, no-transform",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+    "Content-Encoding": "identity",
+}
+
+
 def _sse(event: dict) -> str:
     try:
         payload = json.dumps(event, allow_nan=False, default=_json_default)
@@ -199,13 +215,16 @@ def _sse_job(work) -> StreamingResponse:
             except Exception as exc:
                 emit({"type": "error", "detail": str(exc)})
 
+        # Flush Google Frontend's buffer so the browser sees bytes immediately.
+        yield ":" + (" " * 4096) + "\n\n"
+        yield _sse({"type": "ping"})
         worker = asyncio.create_task(asyncio.to_thread(run))
         try:
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=2.0)
                 except asyncio.TimeoutError:
-                    yield ": ping\n\n"
+                    yield _sse({"type": "ping"})
                     continue
                 yield _sse(event)
                 if event.get("type") in ("done", "error"):
@@ -217,11 +236,7 @@ def _sse_job(work) -> StreamingResponse:
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=SSE_HEADERS,
     )
 
 
@@ -354,8 +369,6 @@ async def optimize(
         parse_spec(timeframe)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    queue: asyncio.Queue[dict] = asyncio.Queue()
-    loop = asyncio.get_running_loop()
 
     def load_series(spec: str):
         try:
@@ -377,59 +390,19 @@ async def optimize(
             if SMA_COL in entry.frame.columns
             else None
         )
-        return close, ema_source, sma_source
+        timestamps = entry.frame["timestamp"] if "timestamp" in entry.frame.columns else None
+        return close, ema_source, sma_source, timestamps
 
-    def on_progress(event: dict) -> None:
-        loop.call_soon_threadsafe(queue.put_nowait, event)
+    def work(emit) -> None:
+        def on_progress(event: dict) -> None:
+            emit(event)
 
-    def run() -> None:
-        try:
-            result = run_optimize(
-                symbol, metric, load_series, on_progress=on_progress, timeframe=timeframe
-            )
-            on_progress({"type": "done", "result": result})
-        except LookupError as exc:
-            on_progress({"type": "error", "detail": str(exc)})
-        except ValueError as exc:
-            on_progress({"type": "error", "detail": str(exc)})
-        except HTTPException as exc:
-            detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
-            on_progress({"type": "error", "detail": detail})
-        except Exception as exc:
-            on_progress({"type": "error", "detail": f"Optimize failed: {exc}"})
+        result = run_optimize(
+            symbol, metric, load_series, on_progress=on_progress, timeframe=timeframe
+        )
+        emit({"type": "done", "result": result})
 
-    def _sse(event: dict) -> str:
-        try:
-            payload = json.dumps(event, allow_nan=False, default=_json_default)
-        except (TypeError, ValueError) as exc:
-            payload = json.dumps({"type": "error", "detail": f"Optimize result not serializable: {exc}"})
-        return f"data: {payload}\n\n"
-
-    async def generate():
-        worker = asyncio.create_task(asyncio.to_thread(run))
-        try:
-            while True:
-                try:
-                    event = await asyncio.wait_for(queue.get(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    yield ": ping\n\n"
-                    continue
-                yield _sse(event)
-                if event.get("type") in ("done", "error"):
-                    yield ": bye\n\n"
-                    break
-        finally:
-            await worker
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return _sse_job(work)
 
 
 @app.get("/api/events")
@@ -439,6 +412,7 @@ async def events(
 ):
     async def generate():
         last = None
+        yield ":" + (" " * 4096) + "\n\n"
         while True:
             try:
                 fp = await asyncio.to_thread(fingerprint, symbol, timeframe)
@@ -464,11 +438,7 @@ async def events(
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=SSE_HEADERS,
     )
 
 
