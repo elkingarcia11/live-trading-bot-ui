@@ -94,7 +94,26 @@ input[type="number"] {
 }
 
 select {
-  min-width: 140px;
+  min-width: 120px;
+}
+
+input.spec {
+  background: #0b1016;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  height: 30px;
+  width: 96px;
+  padding: 0 8px;
+  font: inherit;
+}
+
+.or-label {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding-top: 12px;
 }
 
 .refresh {

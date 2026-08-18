@@ -19,6 +19,8 @@ export interface ChartResponse {
   updated: string | null;
   loaded_at: string;
   bar_count: number;
+  source: "ohlcv" | "trades";
+  path: string;
   params: {
     fast_length: number;
     fast_sigma: number;
@@ -33,6 +35,9 @@ export interface CatalogResponse {
   bucket: string;
   prefix: string;
   symbols: Record<string, string[]>;
+  ohlcv_timeframes?: Record<string, string[]>;
+  has_trades?: Record<string, boolean>;
+  aggregates?: string[];
 }
 
 export interface GmaParams {

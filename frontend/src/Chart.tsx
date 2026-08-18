@@ -9,24 +9,47 @@ import {
 } from "lightweight-charts";
 import type { Bar } from "./types";
 
+export type ChartZone = "local" | "et" | "ct" | "utc";
+
+export const CHART_ZONES: { id: ChartZone; label: string; iana?: string }[] = [
+  { id: "local", label: "Local" },
+  { id: "et", label: "Eastern", iana: "America/New_York" },
+  { id: "ct", label: "Exchange CT", iana: "America/Chicago" },
+  { id: "utc", label: "UTC", iana: "UTC" },
+];
+
 interface Props {
   bars: Bar[];
   fitKey: string;
+  timeZone: ChartZone;
 }
 
-const CHICAGO: Intl.DateTimeFormatOptions = {
-  timeZone: "America/Chicago",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  hour12: false,
-};
-
-function formatTick(time: UTCTimestamp): string {
-  return new Date(time * 1000).toLocaleTimeString("en-US", CHICAGO);
+function ianaFor(zone: ChartZone): string | undefined {
+  return CHART_ZONES.find((item) => item.id === zone)?.iana;
 }
 
-export default function Chart({ bars, fitKey }: Props) {
+function dateOpts(zone: ChartZone, withDate: boolean): Intl.DateTimeFormatOptions {
+  const iana = ianaFor(zone);
+  return {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
+    ...(withDate ? { month: "short", day: "numeric" } : {}),
+    ...(iana ? { timeZone: iana } : {}),
+  };
+}
+
+function unixOf(time: UTCTimestamp): number {
+  return typeof time === "number" ? time : Number(time);
+}
+
+export function formatChartTime(unix: number, zone: ChartZone, withDate = false): string {
+  return new Date(unix * 1000).toLocaleString("en-US", dateOpts(zone, withDate));
+}
+
+export default function Chart({ bars, fitKey, timeZone }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -34,6 +57,8 @@ export default function Chart({ bars, fitKey }: Props) {
   const slowRef = useRef<ISeriesApi<"Line"> | null>(null);
   const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const fittedKeyRef = useRef("");
+  const zoneRef = useRef(timeZone);
+  zoneRef.current = timeZone;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -63,19 +88,12 @@ export default function Chart({ bars, fitKey }: Props) {
         borderColor: "#1c2430",
         timeVisible: true,
         secondsVisible: true,
-        tickMarkFormatter: (time: UTCTimestamp) => formatTick(time),
+        tickMarkFormatter: (time: UTCTimestamp) =>
+          formatChartTime(unixOf(time), zoneRef.current),
       },
       localization: {
         timeFormatter: (time: UTCTimestamp) =>
-          new Date(time * 1000).toLocaleString("en-US", {
-            timeZone: "America/Chicago",
-            month: "short",
-            day: "numeric",
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit",
-            hour12: false,
-          }),
+          formatChartTime(unixOf(time), zoneRef.current, true),
       },
       handleScroll: { mouseWheel: true, pressedMouseMove: true },
       handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true },
@@ -133,6 +151,17 @@ export default function Chart({ bars, fitKey }: Props) {
       chartRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    chartRef.current?.applyOptions({
+      timeScale: {
+        tickMarkFormatter: (time: UTCTimestamp) => formatChartTime(unixOf(time), timeZone),
+      },
+      localization: {
+        timeFormatter: (time: UTCTimestamp) => formatChartTime(unixOf(time), timeZone, true),
+      },
+    });
+  }, [timeZone]);
 
   useEffect(() => {
     if (!candleRef.current || !fastRef.current || !slowRef.current || !volumeRef.current) {

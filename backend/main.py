@@ -12,7 +12,15 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from backend.gcs import OhlcvStore, fingerprint, list_symbols, list_timeframes
+from backend.gcs import (
+    OhlcvStore,
+    fingerprint,
+    has_ohlcv,
+    list_symbols,
+    list_timeframes,
+    list_trade_symbols,
+)
+from backend.aggregate import PRESETS, parse_spec
 from backend.gma import detect_crosses, gaussian_ma
 
 store = OhlcvStore()
@@ -43,7 +51,16 @@ def _finite(value: float) -> float | None:
 
 def _chart_payload(symbol: str, timeframe: str, params: GmaParams, refresh: bool) -> dict:
     try:
+        parse_spec(timeframe)
+    except ValueError as exc:
+        if not has_ohlcv(symbol, timeframe):
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
         entry = store.get(symbol, timeframe, refresh=refresh)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Failed to read GCS: {exc}") from exc
 
@@ -56,6 +73,8 @@ def _chart_payload(symbol: str, timeframe: str, params: GmaParams, refresh: bool
             "updated": entry.updated.isoformat() if entry.updated else None,
             "loaded_at": entry.loaded_at.isoformat(),
             "bar_count": 0,
+            "source": entry.source,
+            "path": entry.path,
             "params": params.model_dump(),
             "bars": [],
             "signals": [],
@@ -97,6 +116,8 @@ def _chart_payload(symbol: str, timeframe: str, params: GmaParams, refresh: bool
         "updated": entry.updated.isoformat() if entry.updated else None,
         "loaded_at": entry.loaded_at.isoformat(),
         "bar_count": len(bars),
+        "source": entry.source,
+        "path": entry.path,
         "params": params.model_dump(),
         "bars": bars,
         "signals": signals,
@@ -112,15 +133,29 @@ def health() -> dict:
 def catalog() -> dict:
     try:
         symbols = list_symbols()
+        trade_names = list_trade_symbols()
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Failed to list symbols: {exc}") from exc
-    tree: dict[str, list[str]] = {}
+    trade_lower = {name.lower() for name in trade_names}
+    ohlcv: dict[str, list[str]] = {}
+    dropdown: dict[str, list[str]] = {}
+    has_trades: dict[str, bool] = {}
     for symbol in symbols:
         try:
-            tree[symbol] = list_timeframes(symbol)
+            existing = list_timeframes(symbol)
         except Exception:
-            tree[symbol] = []
-    return {"bucket": "live-trading-bot", "prefix": "ohlcv", "symbols": tree}
+            existing = []
+        ohlcv[symbol] = existing
+        dropdown[symbol] = existing
+        has_trades[symbol] = symbol.lower() in trade_lower
+    return {
+        "bucket": "live-trading-bot",
+        "prefix": "ohlcv",
+        "symbols": dropdown,
+        "ohlcv_timeframes": ohlcv,
+        "has_trades": has_trades,
+        "aggregates": PRESETS,
+    }
 
 
 @app.get("/api/symbols")
