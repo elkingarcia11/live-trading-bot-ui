@@ -92,6 +92,21 @@ export interface OptimizeProgress {
   message: string;
 }
 
+export interface LoadProgress {
+  type: "progress";
+  pct: number;
+  elapsed_s: number;
+  eta_s: number | null;
+  done: number;
+  total: number;
+  stage: string;
+  message: string;
+  timeframe: string;
+  source: "ohlcv" | "trades" | "";
+  bars?: Bar[];
+  append?: boolean;
+}
+
 export const DEFAULT_PARAMS: GmaParams = {
   fastLength: 30,
   fastSigma: 7,

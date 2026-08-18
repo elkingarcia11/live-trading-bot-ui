@@ -12,7 +12,6 @@ from typing import Callable
 
 import numpy as np
 
-from backend.aggregate import PRESETS
 from backend.gma import gaussian_ma
 
 # Length 5–30 every integer; above 30 only multiples of 5. Sigma 1–10 step 0.5.
@@ -388,12 +387,16 @@ def optimize(
     metric: str,
     load_series,
     on_progress: ProgressFn | None = None,
+    timeframe: str | None = None,
 ) -> dict:
     if metric not in METRICS:
         raise ValueError(f"metric must be one of {sorted(METRICS)}")
+    if not timeframe:
+        raise ValueError("timeframe is required")
+    specs = [timeframe]
     started = time.perf_counter()
     jobs: list[tuple[str, FrameSeries, int]] = []
-    for index, spec in enumerate(PRESETS, start=1):
+    for index, spec in enumerate(specs, start=1):
         _emit(
             on_progress,
             {
@@ -403,7 +406,7 @@ def optimize(
                 "eta_s": None,
                 "timeframe": spec,
                 "frame": index,
-                "frames": len(PRESETS),
+                "frames": len(specs),
                 "tested": 0,
                 "total": 0,
                 "message": f"Loading {spec}",
@@ -466,7 +469,7 @@ def optimize(
             overall = best
     if overall is None:
         raise LookupError(
-            f"No combo produced {MIN_TRADES}+ closed trades for {symbol} ({metric})"
+            f"No combo produced {MIN_TRADES}+ closed trades for {symbol} {timeframe} ({metric})"
         )
     return {
         "symbol": symbol,
@@ -495,7 +498,7 @@ def optimize(
         "wins": overall.wins,
         "bars": overall.bars,
         "tested": tested,
-        "aggregates": PRESETS,
+        "aggregates": [overall.timeframe],
         "frames_searched": frames,
         "min_trades": MIN_TRADES,
         "grid": {"lengths": LENGTHS, "sigmas": SIGMAS},

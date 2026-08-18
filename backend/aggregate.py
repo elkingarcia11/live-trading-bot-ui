@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import re
+from typing import Callable
 
 from backend.gma import EMA_COL, SMA_COL, SOURCE_PERIOD, ema, sma
 import pandas as pd
+
+AggProgressFn = Callable[[str, float], None]
 
 SPEC_RE = re.compile(r"^(\d+)(t|s|m|h)$", re.IGNORECASE)
 PRESETS = ["20t", "50t", "100t", "200t", "500t", "1000t", "1m", "5m", "15m", "30m", "1h"]
@@ -32,15 +35,28 @@ def parse_spec(spec: str) -> tuple[str, int]:
     return "time", seconds
 
 
-def aggregate_trades(trades: pd.DataFrame, spec: str) -> pd.DataFrame:
+def aggregate_trades(
+    trades: pd.DataFrame,
+    spec: str,
+    on_progress: AggProgressFn | None = None,
+) -> pd.DataFrame:
+    def note(message: str, frac: float) -> None:
+        if on_progress is not None:
+            on_progress(message, frac)
+
     kind, size = parse_spec(spec)
+    note(f"Preparing {len(trades):,} trades", 0.05)
     frame = _prepare_trades(trades)
     if frame.empty:
         return _empty_ohlcv()
+    note(f"Prepared {len(frame):,} trades", 0.3)
     if kind == "tick":
+        note(f"Grouping every {size} ticks", 0.4)
         bars = _tick_bars(frame, size)
     else:
+        note(f"Bucketing to {spec}", 0.4)
         bars = _time_bars(frame, size)
+    note(f"Computing source MAs on {len(bars):,} bars", 0.8)
     return attach_source_mas(bars)
 
 

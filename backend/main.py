@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from backend.gcs import (
     OhlcvStore,
+    ProgressClock,
     fingerprint,
     has_ohlcv,
     list_symbols,
@@ -61,14 +62,22 @@ def _json_default(value):
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
-def _chart_payload(symbol: str, timeframe: str, params: GmaParams, refresh: bool) -> dict:
+def _chart_payload(
+    symbol: str,
+    timeframe: str,
+    params: GmaParams,
+    refresh: bool,
+    on_progress=None,
+) -> dict:
+    clock = ProgressClock(on_progress=on_progress, timeframe=timeframe)
+    clock.emit(0, f"Loading {symbol}/{timeframe}", stage="start")
     try:
         parse_spec(timeframe)
     except ValueError as exc:
         if not has_ohlcv(symbol, timeframe):
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
-        entry = store.get(symbol, timeframe, refresh=refresh)
+        entry = store.get(symbol, timeframe, refresh=refresh, progress=clock)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -76,6 +85,7 @@ def _chart_payload(symbol: str, timeframe: str, params: GmaParams, refresh: bool
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Failed to read GCS: {exc}") from exc
 
+    clock.source = entry.source
     frame = entry.frame
     if frame.empty:
         return {
@@ -92,6 +102,7 @@ def _chart_payload(symbol: str, timeframe: str, params: GmaParams, refresh: bool
             "signals": [],
         }
 
+    clock.emit(82, "Computing GMA", stage="gma")
     close = frame["close"].to_numpy()
     ema_source = frame[EMA_COL].to_numpy() if EMA_COL in frame.columns else None
     sma_source = frame[SMA_COL].to_numpy() if SMA_COL in frame.columns else None
@@ -106,6 +117,10 @@ def _chart_payload(symbol: str, timeframe: str, params: GmaParams, refresh: bool
     )
     buy, sell = detect_crosses(fast, slow)
 
+    n = len(frame)
+    clock.emit(88, f"Updating session from {n:,} bars", stage="session", done=0, total=n)
+    chunk_size = 2_500
+    chunk_start = 0
     bars = []
     signals = []
     for i, row in enumerate(frame.itertuples(index=False)):
@@ -129,7 +144,20 @@ def _chart_payload(symbol: str, timeframe: str, params: GmaParams, refresh: bool
         )
         if signal:
             signals.append({"time": unix, "side": signal, "price": float(row.close)})
+        done = i + 1
+        if on_progress is not None and (done % chunk_size == 0 or done == n):
+            chunk = bars[chunk_start:]
+            chunk_start = done
+            clock.emit(
+                88 + 11 * done / n,
+                f"Updating session {done:,}/{n:,} bars",
+                stage="session",
+                done=done,
+                total=n,
+                extra={"bars": chunk, "append": True},
+            )
 
+    clock.emit(99, f"Ready {len(bars):,} bars", stage="session", done=n, total=n)
     return {
         "symbol": symbol,
         "timeframe": timeframe,
@@ -143,6 +171,58 @@ def _chart_payload(symbol: str, timeframe: str, params: GmaParams, refresh: bool
         "bars": bars,
         "signals": signals,
     }
+
+
+def _sse(event: dict) -> str:
+    try:
+        payload = json.dumps(event, allow_nan=False, default=_json_default)
+    except (TypeError, ValueError) as exc:
+        payload = json.dumps({"type": "error", "detail": f"Result not serializable: {exc}"})
+    return f"data: {payload}\n\n"
+
+
+def _sse_job(work) -> StreamingResponse:
+    queue: asyncio.Queue[dict] = asyncio.Queue()
+
+    async def generate():
+        loop = asyncio.get_running_loop()
+
+        def emit(event: dict) -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, event)
+
+        def run() -> None:
+            try:
+                work(emit)
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+                emit({"type": "error", "detail": detail})
+            except Exception as exc:
+                emit({"type": "error", "detail": str(exc)})
+
+        worker = asyncio.create_task(asyncio.to_thread(run))
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                    continue
+                yield _sse(event)
+                if event.get("type") in ("done", "error"):
+                    yield ": bye\n\n"
+                    break
+        finally:
+            await worker
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/health")
@@ -212,7 +292,8 @@ def meta(symbol: str = Query(..., min_length=1), timeframe: str = Query(..., min
 
 
 @app.get("/api/chart")
-def chart(
+async def chart(
+    request: Request,
     symbol: str = Query(..., min_length=1),
     timeframe: str = Query(..., min_length=1),
     refresh: bool = False,
@@ -220,14 +301,21 @@ def chart(
     fast_sigma: float = Query(3.0, ge=1, le=10),
     slow_length: int = Query(50, ge=5, le=100),
     slow_sigma: float = Query(3.0, ge=1, le=10),
-) -> dict:
+):
     params = GmaParams(
         fast_length=fast_length,
         fast_sigma=fast_sigma,
         slow_length=slow_length,
         slow_sigma=slow_sigma,
     )
-    return _chart_payload(symbol, timeframe, params, refresh)
+    if "text/event-stream" in request.headers.get("accept", ""):
+
+        def work(emit) -> None:
+            result = _chart_payload(symbol, timeframe, params, refresh, on_progress=emit)
+            emit({"type": "done", "result": result})
+
+        return _sse_job(work)
+    return await asyncio.to_thread(_chart_payload, symbol, timeframe, params, refresh)
 
 
 @app.post("/api/refresh")
@@ -259,8 +347,13 @@ async def optimize(
         "call_profit_pct",
         "put_profit_pct",
     ] = Query(...),
+    timeframe: str = Query(..., min_length=1),
     refresh: bool = False,
 ):
+    try:
+        parse_spec(timeframe)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     queue: asyncio.Queue[dict] = asyncio.Queue()
     loop = asyncio.get_running_loop()
 
@@ -291,7 +384,9 @@ async def optimize(
 
     def run() -> None:
         try:
-            result = run_optimize(symbol, metric, load_series, on_progress=on_progress)
+            result = run_optimize(
+                symbol, metric, load_series, on_progress=on_progress, timeframe=timeframe
+            )
             on_progress({"type": "done", "result": result})
         except LookupError as exc:
             on_progress({"type": "error", "detail": str(exc)})

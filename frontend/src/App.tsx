@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Chart, { CHART_ZONES, formatChartTime, type ChartZone } from "./Chart";
-import { fetchCatalog, fetchChart, fetchMeta, streamOptimize, watchUrl } from "./api";
-import { DEFAULT_PARAMS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_SIGMA_MAX, GMA_SIGMA_MIN, OPTIMIZE_OPTIONS, gmaScale, isValidGmaPair, type Bar, type GmaParams, type OptimizeMetric, type OptimizeProgress } from "./types";
+import { fetchCatalog, fetchMeta, streamChart, streamOptimize, watchUrl } from "./api";
+import { DEFAULT_PARAMS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_SIGMA_MAX, GMA_SIGMA_MIN, OPTIMIZE_OPTIONS, gmaScale, isValidGmaPair, type Bar, type GmaParams, type LoadProgress, type OptimizeMetric, type OptimizeProgress } from "./types";
 
 import { computeTradeStats, formatActions, formatPct, formatPoints, formatWinRateLine, isUpAction, withActions } from "./tradeStats";
 
@@ -35,6 +35,25 @@ function optimizeStatus(progress: OptimizeProgress | null, metric: OptimizeMetri
   return `${goal} · ${progress.message} (${progress.frame}/${progress.frames}) · ${Math.round(progress.pct)}% · ${pctLeft}% left · ${formatEta(progress.eta_s)}`;
 }
 
+function aggregateStatus(progress: LoadProgress | null, spec: string): string {
+  if (!progress) return `Aggregating ${spec}…`;
+  return `${progress.message} · ${Math.round(progress.pct)}% · ${formatEta(progress.eta_s)}`;
+}
+
+function sessionProgressLine(
+  progress: LoadProgress | null,
+  spec: string,
+  stats: { winRate: number | null; wins: number; closedTrades: number; profitPct: number },
+  barCount: number
+): string {
+  const base = aggregateStatus(progress, spec);
+  if (!barCount) return base;
+  return (
+    `${base} · ${barCount.toLocaleString()} bars · ` +
+    `${formatWinRateLine(stats.winRate, stats.wins, stats.closedTrades)} · ${formatPct(stats.profitPct)}`
+  );
+}
+
 export default function App() {
   const [catalog, setCatalog] = useState<Record<string, string[]>>({});
   const [hasTrades, setHasTrades] = useState<Record<string, boolean>>({});
@@ -59,6 +78,7 @@ export default function App() {
   const [optimizeTarget, setOptimizeTarget] = useState<OptimizeMetric | "">("");
   const [optimizeNote, setOptimizeNote] = useState<string | null>(null);
   const [optimizeProgress, setOptimizeProgress] = useState<OptimizeProgress | null>(null);
+  const [chartProgress, setChartProgress] = useState<LoadProgress | null>(null);
   const fingerprintRef = useRef("");
   const paramsRef = useRef(params);
   const requestRef = useRef(0);
@@ -70,6 +90,7 @@ export default function App() {
   const timeframes = catalog[symbol] ?? [];
   const aggregateSpec = aggregate === "custom" ? customSpec.trim() : aggregate;
   const effectiveTf = aggregateSpec || timeframe;
+  const aggregating = Boolean(aggregateSpec) && (status === "loading" || chartProgress != null);
   const last = bars.at(-1) ?? null;
   const labeledBars = useMemo(() => withActions(bars), [bars]);
   const tradeStats = useMemo(() => computeTradeStats(labeledBars), [labeledBars]);
@@ -105,9 +126,33 @@ export default function App() {
     ) => {
       if (!nextSymbol || !nextTf || optimizingRef.current) return;
       const requestId = ++requestRef.current;
+      const trackAgg = Boolean(aggregate) && refresh;
       setBusy(true);
+      if (trackAgg) {
+        setBars([]);
+        setChartProgress({
+          type: "progress",
+          pct: 0,
+          elapsed_s: 0,
+          eta_s: null,
+          done: 0,
+          total: 0,
+          stage: "start",
+          message: `Aggregating ${nextTf} from trades`,
+          timeframe: nextTf,
+          source: "trades",
+        });
+      } else if (!aggregate) {
+        setChartProgress(null);
+      }
       try {
-        const data = await fetchChart(nextSymbol, nextTf, nextParams, refresh);
+        const data = await streamChart(nextSymbol, nextTf, nextParams, refresh, (progress) => {
+          if (!trackAgg || requestId !== requestRef.current || optimizingRef.current) return;
+          setChartProgress(progress);
+          if (progress.bars?.length) {
+            setBars((prev) => (progress.append ? [...prev, ...progress.bars!] : progress.bars!));
+          }
+        });
         if (requestId !== requestRef.current || optimizingRef.current) return;
         fingerprintRef.current = data.fingerprint;
         setBars(data.bars);
@@ -122,15 +167,18 @@ export default function App() {
         setError(err instanceof Error ? err.message : String(err));
         setStatus("stale");
       } finally {
-        if (requestId === requestRef.current) setBusy(false);
+        if (requestId === requestRef.current) {
+          setBusy(false);
+          setChartProgress(null);
+        }
       }
     },
-    [symbol, effectiveTf]
+    [symbol, effectiveTf, aggregate]
   );
 
   const runOptimize = useCallback(
     async (metric: OptimizeMetric) => {
-      if (!symbol || optimizingRef.current) return;
+      if (!symbol || !effectiveTf || optimizingRef.current) return;
       optimizingRef.current = true;
       requestRef.current += 1;
       setBusy(false);
@@ -140,15 +188,13 @@ export default function App() {
       setOptimizeNote(null);
       setOptimizeProgress(null);
       try {
-        const result = await streamOptimize(symbol, metric, setOptimizeProgress);
+        const result = await streamOptimize(symbol, effectiveTf, metric, setOptimizeProgress);
         const nextParams: GmaParams = {
           fastLength: Number(result.params.fast_length),
           fastSigma: Number(result.params.fast_sigma),
           slowLength: Number(result.params.slow_length),
           slowSigma: Number(result.params.slow_sigma),
         };
-        setTimeframe("");
-        setAggregate(result.timeframe);
         setDraft(nextParams);
         setParams(nextParams);
         const goal = OPTIMIZE_OPTIONS.find((item) => item.id === metric)?.label ?? metric;
@@ -168,7 +214,7 @@ export default function App() {
         optimizingRef.current = false;
       }
     },
-    [symbol]
+    [symbol, effectiveTf]
   );
 
   useEffect(() => {
@@ -333,54 +379,37 @@ export default function App() {
             />
           </label>
         )}
-        <span className="or-label">or</span>
-        <label className="field">
-          <span>Optimize</span>
-          <select
-            value={optimizing ? "" : optimizeTarget}
-            disabled={!symbol || !hasTrades[symbol] || optimizing != null}
-            onChange={(e) => {
-              const next = e.target.value as OptimizeMetric | "";
-              if (!next) {
-                setOptimizeTarget("");
-                return;
-              }
-              runOptimize(next);
-            }}
-          >
-            <option value="">
-              {optimizing
-                ? optimizeProgress?.total
-                  ? `${Math.round(optimizeProgress.pct)}% · ${formatEta(optimizeProgress.eta_s)}`
-                  : optimizeProgress?.message ?? "Searching…"
-                : "Select target"}
-            </option>
-            {OPTIMIZE_OPTIONS.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-        </label>
         <button
           className="refresh"
           type="button"
           onClick={() => loadChart(true)}
           disabled={locked || busy || !symbol || !effectiveTf}
         >
-          {locked ? "Locked" : busy ? "Pulling…" : "Refresh GCS"}
+          {locked
+            ? "Locked"
+            : aggregating
+              ? chartProgress
+                ? `${Math.round(chartProgress.pct)}%`
+                : "Aggregating…"
+              : busy
+                ? "Pulling…"
+                : "Refresh GCS"}
         </button>
         <div className={`live-pill ${locked ? "paused" : status}`}>
           <span className="dot" />
           {locked
             ? "Paused"
-            : status === "live"
-              ? "Listening"
-              : status === "loading"
-                ? "Loading"
-                : status === "stale"
-                  ? "Reconnect"
-                  : "Idle"}
+            : aggregating
+              ? chartProgress
+                ? `Aggregating ${Math.round(chartProgress.pct)}%`
+                : "Aggregating"
+              : status === "live"
+                ? "Listening"
+                : status === "loading"
+                  ? "Loading"
+                  : status === "stale"
+                    ? "Reconnect"
+                    : "Idle"}
         </div>
       </header>
 
@@ -476,15 +505,38 @@ export default function App() {
             <p className="hint warn">Invalid pair: fast L/σ must be less than slow L/σ</p>
           )}
         </section>
-        <section className="legend">
-          <h2>Legend</h2>
-          <div><i className="swatch fast" /> Fast GMA (EMA 3)</div>
-          <div><i className="swatch slow" /> Slow GMA (SMA 3)</div>
-          <div><i className="arrow buy" /> Open call / close put</div>
-          <div><i className="arrow sell" /> Open put / close call</div>
-        </section>
-        <section className="stats">
-          <h2>Session</h2>
+        <section>
+          <h2>Optimize</h2>
+          <p className="hint">{effectiveTf ? `Current ${effectiveTf}` : "Select a timeframe first"}</p>
+          <label className="field">
+            <span>Target</span>
+            <select
+              className="optimize"
+              value={optimizing ? "" : optimizeTarget}
+              disabled={!symbol || !effectiveTf || optimizing != null}
+              onChange={(e) => {
+                const next = e.target.value as OptimizeMetric | "";
+                if (!next) {
+                  setOptimizeTarget("");
+                  return;
+                }
+                runOptimize(next);
+              }}
+            >
+              <option value="">
+                {optimizing
+                  ? optimizeProgress?.total
+                    ? `${Math.round(optimizeProgress.pct)}% · ${formatEta(optimizeProgress.eta_s)}`
+                    : optimizeProgress?.message ?? "Searching…"
+                  : "Select target"}
+              </option>
+              {OPTIMIZE_OPTIONS.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
           {optimizing && (
             <div className="optimize-progress">
               <p className="hint">{optimizeStatus(optimizeProgress, optimizing)}</p>
@@ -494,6 +546,24 @@ export default function App() {
             </div>
           )}
           {optimizeNote && <p className="hint">{optimizeNote}</p>}
+        </section>
+        <section className="legend">
+          <h2>Legend</h2>
+          <div><i className="swatch fast" /> Fast GMA (EMA 3)</div>
+          <div><i className="swatch slow" /> Slow GMA (SMA 3)</div>
+          <div><i className="arrow buy" /> Open call / close put</div>
+          <div><i className="arrow sell" /> Open put / close call</div>
+        </section>
+        <section className="stats">
+          <h2>Session{aggregating && aggregateSpec ? ` · ${aggregateSpec}` : ""}</h2>
+          {aggregating && (
+            <div className="optimize-progress">
+              <p className="hint">{sessionProgressLine(chartProgress, aggregateSpec, tradeStats, bars.length)}</p>
+              <div className="bar">
+                <span style={{ width: `${Math.min(100, Math.max(2, chartProgress?.pct ?? 1))}%` }} />
+              </div>
+            </div>
+          )}
           {bars.length < Math.max(params.fastLength, params.slowLength) && (
             <p className="hint">
               GMA lines appear after {Math.max(params.fastLength, params.slowLength)} bars
@@ -502,39 +572,9 @@ export default function App() {
           )}
           <dl>
             <div>
-              <dt>Total profit</dt>
-              <dd className={tradeStats.profit >= 0 ? "buy" : "sell"}>
-                {formatPoints(tradeStats.profit)}
-              </dd>
-            </div>
-            <div>
-              <dt>Call profit</dt>
-              <dd className={tradeStats.callProfit >= 0 ? "buy" : "sell"}>
-                {formatPoints(tradeStats.callProfit)}
-              </dd>
-            </div>
-            <div>
-              <dt>Put profit</dt>
-              <dd className={tradeStats.putProfit >= 0 ? "buy" : "sell"}>
-                {formatPoints(tradeStats.putProfit)}
-              </dd>
-            </div>
-            <div>
               <dt>Total %</dt>
               <dd className={tradeStats.profitPct >= 0 ? "buy" : "sell"}>
                 {formatPct(tradeStats.profitPct)}
-              </dd>
-            </div>
-            <div>
-              <dt>Call %</dt>
-              <dd className={tradeStats.callProfitPct >= 0 ? "buy" : "sell"}>
-                {formatPct(tradeStats.callProfitPct)}
-              </dd>
-            </div>
-            <div>
-              <dt>Put %</dt>
-              <dd className={tradeStats.putProfitPct >= 0 ? "buy" : "sell"}>
-                {formatPct(tradeStats.putProfitPct)}
               </dd>
             </div>
             <div>
@@ -544,9 +584,35 @@ export default function App() {
               </dd>
             </div>
             <div>
+              <dt>Max drawdown %</dt>
+              <dd className={tradeStats.maxDrawdownPct < 0 ? "sell" : ""}>
+                {formatPct(tradeStats.maxDrawdownPct)}
+              </dd>
+            </div>
+            <div>
+              <dt>Max runup %</dt>
+              <dd className={tradeStats.maxRunupPct > 0 ? "buy" : ""}>
+                {formatPct(tradeStats.maxRunupPct)}
+              </dd>
+            </div>
+            <div className="group-start">
+              <dt>Call %</dt>
+              <dd className={tradeStats.callProfitPct >= 0 ? "buy" : "sell"}>
+                {formatPct(tradeStats.callProfitPct)}
+              </dd>
+            </div>
+            <div>
               <dt>Call win rate</dt>
               <dd>
                 {formatWinRateLine(tradeStats.callWinRate, tradeStats.callWins, tradeStats.closeCalls)}
+              </dd>
+            </div>
+            <div><dt>Open calls</dt><dd className="buy">{tradeStats.openCalls}</dd></div>
+            <div><dt>Close calls</dt><dd className="buy">{tradeStats.closeCalls}</dd></div>
+            <div className="group-start">
+              <dt>Put %</dt>
+              <dd className={tradeStats.putProfitPct >= 0 ? "buy" : "sell"}>
+                {formatPct(tradeStats.putProfitPct)}
               </dd>
             </div>
             <div>
@@ -555,20 +621,21 @@ export default function App() {
                 {formatWinRateLine(tradeStats.putWinRate, tradeStats.putWins, tradeStats.closePuts)}
               </dd>
             </div>
+            <div><dt>Open puts</dt><dd className="sell">{tradeStats.openPuts}</dd></div>
+            <div><dt>Close puts</dt><dd className="sell">{tradeStats.closePuts}</dd></div>
             {tradeStats.openPosition && tradeStats.unrealized != null && tradeStats.unrealizedPct != null && (
-              <div>
+              <div className="group-start">
                 <dt>Open {tradeStats.openSide === "long" ? "call" : "put"}</dt>
                 <dd className={tradeStats.unrealized >= 0 ? "buy" : "sell"}>
                   {formatPoints(tradeStats.unrealized)} / {formatPct(tradeStats.unrealizedPct)}
                 </dd>
               </div>
             )}
-            <div><dt>Last</dt><dd>{formatPrice(last?.close)}</dd></div>
+            <div className="group-start">
+              <dt>Last</dt>
+              <dd>{formatPrice(last?.close)}</dd>
+            </div>
             <div><dt>Bars</dt><dd>{bars.length}</dd></div>
-            <div><dt>Open calls</dt><dd className="buy">{tradeStats.openCalls}</dd></div>
-            <div><dt>Close calls</dt><dd className="buy">{tradeStats.closeCalls}</dd></div>
-            <div><dt>Open puts</dt><dd className="sell">{tradeStats.openPuts}</dd></div>
-            <div><dt>Close puts</dt><dd className="sell">{tradeStats.closePuts}</dd></div>
             <div>
               <dt>Last action</dt>
               <dd className={tradeStats.lastActions.some(isUpAction) ? "buy" : tradeStats.lastActions.length ? "sell" : ""}>
@@ -596,12 +663,38 @@ export default function App() {
             <span>Chart frozen until optimization finishes</span>
           </div>
         )}
+        {!locked && aggregating && (
+          <div className="chart-lock aggregating">
+            <div className="agg-progress">
+              <span>{chartProgress?.message ?? `Aggregating ${aggregateSpec} from trades`}</span>
+              <div className="bar">
+                <span style={{ width: `${Math.min(100, Math.max(2, chartProgress?.pct ?? 1))}%` }} />
+              </div>
+              <span className="meta">
+                {chartProgress
+                  ? `${Math.round(chartProgress.pct)}% · ${formatEta(chartProgress.eta_s)}`
+                  : "starting…"}
+                {bars.length
+                  ? ` · ${bars.length.toLocaleString()} bars · ${formatWinRateLine(tradeStats.winRate, tradeStats.wins, tradeStats.closedTrades)} · ${formatPct(tradeStats.profitPct)}`
+                  : ""}
+              </span>
+            </div>
+          </div>
+        )}
         <Chart bars={labeledBars} fitKey={`${symbol}|${effectiveTf}`} timeZone={chartZone} />
       </main>
 
       <footer className="status">
         <span>gs://live-trading-bot/{path || `${symbol || "—"}/${effectiveTf || "—"}`}</span>
-        <span>{source === "trades" ? "Aggregated from trades" : source === "ohlcv" ? "Precomputed ohlcv" : ""}</span>
+        <span>
+          {aggregating
+            ? sessionProgressLine(chartProgress, aggregateSpec, tradeStats, bars.length)
+            : source === "trades"
+              ? "Aggregated from trades"
+              : source === "ohlcv"
+                ? "Precomputed ohlcv"
+                : ""}
+        </span>
         <span>Object updated {formatClock(updated, chartZone)}</span>
         <span>Cached {formatClock(loadedAt, chartZone)}</span>
         <span>

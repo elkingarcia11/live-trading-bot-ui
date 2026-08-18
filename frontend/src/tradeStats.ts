@@ -33,6 +33,8 @@ export interface TradeStats {
   profitPct: number;
   callProfitPct: number;
   putProfitPct: number;
+  maxDrawdownPct: number;
+  maxRunupPct: number;
   openCalls: number;
   closeCalls: number;
   openPuts: number;
@@ -110,6 +112,8 @@ export function computeTradeStats(bars: Bar[]): TradeStats {
     profitPct: 0,
     callProfitPct: 0,
     putProfitPct: 0,
+    maxDrawdownPct: 0,
+    maxRunupPct: 0,
     openCalls: 0,
     closeCalls: 0,
     openPuts: 0,
@@ -138,6 +142,10 @@ export function computeTradeStats(bars: Bar[]): TradeStats {
   let openPuts = 0;
   let closePuts = 0;
   let lastActions: Action[] = [];
+  let peakPct = 0;
+  let troughPct = 0;
+  let maxDrawdownPct = 0;
+  let maxRunupPct = 0;
 
   for (const bar of labeled) {
     if (bar.actions?.length) lastActions = bar.actions;
@@ -176,6 +184,17 @@ export function computeTradeStats(bars: Bar[]): TradeStats {
         openPuts += 1;
       }
     }
+
+    let equityPct = callProfitPct + putProfitPct;
+    if (entry != null && side != null) {
+      equityPct += side === "long" ? callPct(entry, bar.close) : putPct(entry, bar.close);
+    }
+    if (equityPct > peakPct) peakPct = equityPct;
+    if (equityPct < troughPct) troughPct = equityPct;
+    const drawdownPct = equityPct - peakPct;
+    const runupPct = equityPct - troughPct;
+    if (drawdownPct < maxDrawdownPct) maxDrawdownPct = drawdownPct;
+    if (runupPct > maxRunupPct) maxRunupPct = runupPct;
   }
 
   const last = labeled.at(-1)!;
@@ -202,6 +221,8 @@ export function computeTradeStats(bars: Bar[]): TradeStats {
     profitPct,
     callProfitPct,
     putProfitPct,
+    maxDrawdownPct,
+    maxRunupPct,
     openCalls,
     closeCalls,
     openPuts,
