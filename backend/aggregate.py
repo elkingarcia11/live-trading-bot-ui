@@ -7,7 +7,7 @@ import re
 import pandas as pd
 
 SPEC_RE = re.compile(r"^(\d+)(t|s|m|h)$", re.IGNORECASE)
-PRESETS = ["50t", "100t", "200t", "500t", "1000t", "1m", "5m", "15m", "30m", "1h"]
+PRESETS = ["20t", "50t", "100t", "200t", "500t", "1000t", "1m", "5m", "15m", "30m", "1h"]
 
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600}
 

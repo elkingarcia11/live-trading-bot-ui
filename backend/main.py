@@ -6,6 +6,9 @@ import math
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
+from typing import Literal
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
@@ -22,6 +25,7 @@ from backend.gcs import (
 )
 from backend.aggregate import PRESETS, parse_spec
 from backend.gma import detect_crosses, gaussian_ma
+from backend.optimize import optimize as run_optimize
 
 store = OhlcvStore()
 app = FastAPI(title="Live Trading Bot UI", version="1.0.0")
@@ -225,6 +229,42 @@ def refresh(
         slow_sigma=slow_sigma,
     )
     return _chart_payload(symbol, timeframe, params, refresh=True)
+
+
+@app.get("/api/optimize")
+def optimize(
+    symbol: str = Query(..., min_length=1),
+    metric: Literal[
+        "total_profit",
+        "call_profit",
+        "put_profit",
+        "total_pct",
+        "call_pct",
+        "put_pct",
+    ] = Query(...),
+    refresh: bool = False,
+) -> dict:
+    def load_close(spec: str):
+        try:
+            entry = store.get(symbol, spec, refresh=refresh)
+        except FileNotFoundError:
+            return None
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Failed to read {spec}: {exc}") from exc
+        if entry.frame.empty or "close" not in entry.frame.columns:
+            return None
+        return entry.frame["close"].to_numpy(dtype=np.float64)
+
+    try:
+        return run_optimize(symbol, metric, load_close)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Optimize failed: {exc}") from exc
 
 
 @app.get("/api/events")

@@ -1,4 +1,4 @@
-import type { CatalogResponse, ChartResponse, GmaParams } from "./types";
+import type { CatalogResponse, ChartResponse, GmaParams, OptimizeMetric } from "./types";
 
 function query(params: GmaParams): string {
   const q = new URLSearchParams({
@@ -48,6 +48,40 @@ export function fetchMeta(symbol: string, timeframe: string) {
   const q = new URLSearchParams({ symbol, timeframe });
   return fetch(`/api/meta?${q.toString()}`).then((r) =>
     readJson<{ fingerprint: string; stale: boolean }>(r)
+  );
+}
+
+export function fetchOptimize(symbol: string, metric: OptimizeMetric) {
+  const q = new URLSearchParams({ symbol, metric });
+  return fetch(`/api/optimize?${q.toString()}`).then((r) =>
+    readJson<{
+      symbol: string;
+      metric: OptimizeMetric;
+      timeframe: string;
+      params: {
+        fast_length: number;
+        fast_sigma: number;
+        slow_length: number;
+        slow_sigma: number;
+      };
+      win_rate: number;
+      call_win_rate: number | null;
+      put_win_rate: number | null;
+      profit: number;
+      call_profit: number;
+      put_profit: number;
+      profit_pct: number;
+      closed_trades: number;
+      close_calls: number;
+      close_puts: number;
+      call_profit_pct: number;
+      put_profit_pct: number;
+      wins: number;
+      call_wins: number;
+      put_wins: number;
+      bars: number;
+      tested: number;
+    }>(r)
   );
 }
 

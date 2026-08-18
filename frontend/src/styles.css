@@ -35,7 +35,7 @@ body {
   height: 100%;
   display: grid;
   grid-template-columns: 248px 1fr;
-  grid-template-rows: 56px 1fr 28px;
+  grid-template-rows: auto 1fr 28px;
   grid-template-areas:
     "top top"
     "side stage"
@@ -45,9 +45,11 @@ body {
 .topbar {
   grid-area: top;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 16px;
-  padding: 0 16px;
+  gap: 12px 16px;
+  min-height: 56px;
+  padding: 8px 16px;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
 }
@@ -114,6 +116,22 @@ input.spec {
   letter-spacing: 0.12em;
   text-transform: uppercase;
   padding-top: 12px;
+}
+
+.optimize {
+  cursor: pointer;
+  background: #15202c;
+  border-color: #2a3a4d;
+  white-space: nowrap;
+}
+
+.optimize:hover:not(:disabled) {
+  border-color: var(--fast);
+}
+
+.optimize:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .refresh {
@@ -237,8 +255,22 @@ input[type="range"] {
 
 .swatch.fast { background: var(--fast); }
 .swatch.slow { background: var(--slow); }
-.swatch.buy { background: var(--buy); }
-.swatch.sell { background: var(--sell); }
+
+.arrow {
+  display: inline-block;
+  width: 0;
+  height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+}
+
+.arrow.buy {
+  border-bottom: 9px solid var(--buy);
+}
+
+.arrow.sell {
+  border-top: 9px solid var(--sell);
+}
 
 .stats dl {
   margin: 0;

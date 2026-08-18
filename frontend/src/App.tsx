@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Chart, { CHART_ZONES, formatChartTime, type ChartZone } from "./Chart";
-import { fetchCatalog, fetchChart, fetchMeta, watchUrl } from "./api";
-import { DEFAULT_PARAMS, type Bar, type GmaParams } from "./types";
+import { fetchCatalog, fetchChart, fetchMeta, fetchOptimize, watchUrl } from "./api";
+import { DEFAULT_PARAMS, OPTIMIZE_OPTIONS, type Bar, type GmaParams, type OptimizeMetric } from "./types";
 
-import { computeTradeStats, formatPct, formatWinRate } from "./tradeStats";
+import { computeTradeStats, formatActions, formatPct, formatPoints, formatWinRateLine, isUpAction, withActions } from "./tradeStats";
 
-const FALLBACK_AGGREGATES = ["50t", "100t", "200t", "500t", "1000t", "1m", "5m", "15m", "30m", "1h"];
+const FALLBACK_AGGREGATES = ["20t", "50t", "100t", "200t", "500t", "1000t", "1m", "5m", "15m", "30m", "1h"];
 
 function formatPrice(value: number | null | undefined): string {
   if (value == null || Number.isNaN(value)) return "—";
@@ -37,6 +37,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "live" | "stale">("idle");
   const [busy, setBusy] = useState(false);
+  const [optimizing, setOptimizing] = useState<OptimizeMetric | null>(null);
+  const [optimizeNote, setOptimizeNote] = useState<string | null>(null);
   const fingerprintRef = useRef("");
   const paramsRef = useRef(params);
   const requestRef = useRef(0);
@@ -47,10 +49,8 @@ export default function App() {
   const aggregateSpec = aggregate === "custom" ? customSpec.trim() : aggregate;
   const effectiveTf = aggregateSpec || timeframe;
   const last = bars.at(-1) ?? null;
-  const buys = bars.filter((bar) => bar.signal === "buy").length;
-  const sells = bars.filter((bar) => bar.signal === "sell").length;
-  const lastSignal = [...bars].reverse().find((bar) => bar.signal) ?? null;
-  const tradeStats = useMemo(() => computeTradeStats(bars), [bars]);
+  const labeledBars = useMemo(() => withActions(bars), [bars]);
+  const tradeStats = useMemo(() => computeTradeStats(labeledBars), [labeledBars]);
 
   const loadCatalog = useCallback(async () => {
     const data = await fetchCatalog();
@@ -101,6 +101,40 @@ export default function App() {
       }
     },
     [symbol, effectiveTf]
+  );
+
+  const runOptimize = useCallback(
+    async (metric: OptimizeMetric) => {
+      if (!symbol || optimizing) return;
+      setOptimizing(metric);
+      setError(null);
+      setOptimizeNote(null);
+      try {
+        const result = await fetchOptimize(symbol, metric);
+        const nextParams: GmaParams = {
+          fastLength: result.params.fast_length,
+          fastSigma: result.params.fast_sigma,
+          slowLength: result.params.slow_length,
+          slowSigma: result.params.slow_sigma,
+        };
+        setTimeframe("");
+        setAggregate(result.timeframe);
+        setDraft(nextParams);
+        setParams(nextParams);
+        const goal = OPTIMIZE_OPTIONS.find((item) => item.id === metric)?.label ?? metric;
+        setOptimizeNote(
+          `${goal} · ${result.timeframe} · ` +
+            `total ${formatPoints(result.profit)} / ${formatPct(result.profit_pct)} · ` +
+            `call ${formatPoints(result.call_profit)} / ${formatPct(result.call_profit_pct)} · ` +
+            `put ${formatPoints(result.put_profit)} / ${formatPct(result.put_profit_pct)}`
+        );
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setOptimizing(null);
+      }
+    },
+    [symbol, optimizing]
   );
 
   useEffect(() => {
@@ -235,6 +269,25 @@ export default function App() {
             />
           </label>
         )}
+        <span className="or-label">or</span>
+        <label className="field">
+          <span>Optimize</span>
+          <select
+            value=""
+            disabled={!symbol || !hasTrades[symbol] || optimizing != null}
+            onChange={(e) => {
+              const next = e.target.value as OptimizeMetric;
+              if (next) runOptimize(next);
+            }}
+          >
+            <option value="">{optimizing ? "Searching…" : "Select target"}</option>
+            {OPTIMIZE_OPTIONS.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+        </label>
         <button
           className="refresh"
           type="button"
@@ -334,11 +387,12 @@ export default function App() {
           <h2>Legend</h2>
           <div><i className="swatch fast" /> Fast GMA</div>
           <div><i className="swatch slow" /> Slow GMA</div>
-          <div><i className="swatch buy" /> Call: buy → sell (up = win)</div>
-          <div><i className="swatch sell" /> Put: sell → buy (down = win)</div>
+          <div><i className="arrow buy" /></div>
+          <div><i className="arrow sell" /></div>
         </section>
         <section className="stats">
           <h2>Session</h2>
+          {optimizeNote && <p className="hint">{optimizeNote}</p>}
           {bars.length < Math.max(params.fastLength, params.slowLength) && (
             <p className="hint">
               GMA lines appear after {Math.max(params.fastLength, params.slowLength)} bars
@@ -346,32 +400,78 @@ export default function App() {
             </p>
           )}
           <dl>
-            <div><dt>Last</dt><dd>{formatPrice(last?.close)}</dd></div>
-            <div><dt>Bars</dt><dd>{bars.length}</dd></div>
-            <div><dt>Buys</dt><dd className="buy">{buys}</dd></div>
-            <div><dt>Sells</dt><dd className="sell">{sells}</dd></div>
             <div>
-              <dt>Win rate</dt>
-              <dd>{formatWinRate(tradeStats.winRate)}</dd>
+              <dt>Total profit</dt>
+              <dd className={tradeStats.profit >= 0 ? "buy" : "sell"}>
+                {formatPoints(tradeStats.profit)}
+              </dd>
             </div>
             <div>
-              <dt>Profit</dt>
+              <dt>Call profit</dt>
+              <dd className={tradeStats.callProfit >= 0 ? "buy" : "sell"}>
+                {formatPoints(tradeStats.callProfit)}
+              </dd>
+            </div>
+            <div>
+              <dt>Put profit</dt>
+              <dd className={tradeStats.putProfit >= 0 ? "buy" : "sell"}>
+                {formatPoints(tradeStats.putProfit)}
+              </dd>
+            </div>
+            <div>
+              <dt>Total %</dt>
               <dd className={tradeStats.profitPct >= 0 ? "buy" : "sell"}>
                 {formatPct(tradeStats.profitPct)}
               </dd>
             </div>
-            {tradeStats.openPosition && tradeStats.unrealizedPct != null && (
+            <div>
+              <dt>Call %</dt>
+              <dd className={tradeStats.callProfitPct >= 0 ? "buy" : "sell"}>
+                {formatPct(tradeStats.callProfitPct)}
+              </dd>
+            </div>
+            <div>
+              <dt>Put %</dt>
+              <dd className={tradeStats.putProfitPct >= 0 ? "buy" : "sell"}>
+                {formatPct(tradeStats.putProfitPct)}
+              </dd>
+            </div>
+            <div>
+              <dt>Total win rate</dt>
+              <dd>
+                {formatWinRateLine(tradeStats.winRate, tradeStats.wins, tradeStats.closedTrades)}
+              </dd>
+            </div>
+            <div>
+              <dt>Call win rate</dt>
+              <dd>
+                {formatWinRateLine(tradeStats.callWinRate, tradeStats.callWins, tradeStats.closeCalls)}
+              </dd>
+            </div>
+            <div>
+              <dt>Put win rate</dt>
+              <dd>
+                {formatWinRateLine(tradeStats.putWinRate, tradeStats.putWins, tradeStats.closePuts)}
+              </dd>
+            </div>
+            {tradeStats.openPosition && tradeStats.unrealized != null && tradeStats.unrealizedPct != null && (
               <div>
-                <dt>Open {tradeStats.openSide === "long" ? "call" : "put"} P&amp;L</dt>
-                <dd className={tradeStats.unrealizedPct >= 0 ? "buy" : "sell"}>
-                  {formatPct(tradeStats.unrealizedPct)}
+                <dt>Open {tradeStats.openSide === "long" ? "call" : "put"}</dt>
+                <dd className={tradeStats.unrealized >= 0 ? "buy" : "sell"}>
+                  {formatPoints(tradeStats.unrealized)} / {formatPct(tradeStats.unrealizedPct)}
                 </dd>
               </div>
             )}
+            <div><dt>Last</dt><dd>{formatPrice(last?.close)}</dd></div>
+            <div><dt>Bars</dt><dd>{bars.length}</dd></div>
+            <div><dt>Open calls</dt><dd className="buy">{tradeStats.openCalls}</dd></div>
+            <div><dt>Close calls</dt><dd className="buy">{tradeStats.closeCalls}</dd></div>
+            <div><dt>Open puts</dt><dd className="sell">{tradeStats.openPuts}</dd></div>
+            <div><dt>Close puts</dt><dd className="sell">{tradeStats.closePuts}</dd></div>
             <div>
-              <dt>Last signal</dt>
-              <dd className={lastSignal?.signal ?? ""}>
-                {lastSignal?.signal ? lastSignal.signal.toUpperCase() : "—"}
+              <dt>Last action</dt>
+              <dd className={tradeStats.lastActions.some(isUpAction) ? "buy" : tradeStats.lastActions.length ? "sell" : ""}>
+                {formatActions(tradeStats.lastActions)}
               </dd>
             </div>
           </dl>
@@ -390,7 +490,7 @@ export default function App() {
 
       <main className="stage">
         {error && <div className="banner">{error}</div>}
-        <Chart bars={bars} fitKey={`${symbol}|${effectiveTf}`} timeZone={chartZone} />
+        <Chart bars={labeledBars} fitKey={`${symbol}|${effectiveTf}`} timeZone={chartZone} />
       </main>
 
       <footer className="status">

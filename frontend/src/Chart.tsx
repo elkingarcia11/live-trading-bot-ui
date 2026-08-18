@@ -82,7 +82,7 @@ export default function Chart({ bars, fitKey, timeZone }: Props) {
       },
       rightPriceScale: {
         borderColor: "#1c2430",
-        scaleMargins: { top: 0.08, bottom: 0.22 },
+        scaleMargins: { top: 0.14, bottom: 0.24 },
       },
       timeScale: {
         borderColor: "#1c2430",
@@ -212,24 +212,18 @@ export default function Chart({ bars, fitKey, timeZone }: Props) {
     );
     candleRef.current.setMarkers(
       unique
-        .filter((bar) => bar.signal)
-        .map((bar) =>
-          bar.signal === "buy"
-            ? {
-                time: bar.time as UTCTimestamp,
-                position: "belowBar" as const,
-                color: "#00e676",
-                shape: "arrowUp" as const,
-                text: "BUY",
-              }
-            : {
-                time: bar.time as UTCTimestamp,
-                position: "aboveBar" as const,
-                color: "#ff5252",
-                shape: "arrowDown" as const,
-                text: "SELL",
-              }
-        )
+        .filter((bar) => bar.actions?.length)
+        .map((bar) => {
+          const callish =
+            bar.actions!.includes("open_call") || bar.actions!.includes("close_put");
+          return {
+            time: bar.time as UTCTimestamp,
+            position: (callish ? "belowBar" : "aboveBar") as "belowBar" | "aboveBar",
+            color: callish ? "#00e676" : "#ff5252",
+            shape: (callish ? "arrowUp" : "arrowDown") as "arrowUp" | "arrowDown",
+            size: 2.5,
+          };
+        })
     );
     if (fittedKeyRef.current !== fitKey) {
       fittedKeyRef.current = fitKey;

@@ -1,4 +1,5 @@
 export type SignalSide = "buy" | "sell";
+export type Action = "open_call" | "close_call" | "open_put" | "close_put";
 
 export interface Bar {
   time: number;
@@ -10,6 +11,7 @@ export interface Bar {
   gma_fast: number | null;
   gma_slow: number | null;
   signal: SignalSide | null;
+  actions?: Action[];
 }
 
 export interface ChartResponse {
@@ -46,6 +48,23 @@ export interface GmaParams {
   slowLength: number;
   slowSigma: number;
 }
+
+export type OptimizeMetric =
+  | "total_profit"
+  | "call_profit"
+  | "put_profit"
+  | "total_pct"
+  | "call_pct"
+  | "put_pct";
+
+export const OPTIMIZE_OPTIONS: { id: OptimizeMetric; label: string }[] = [
+  { id: "total_profit", label: "Maximize total profit" },
+  { id: "call_profit", label: "Maximize call profit" },
+  { id: "put_profit", label: "Maximize put profit" },
+  { id: "total_pct", label: "Maximize total %" },
+  { id: "call_pct", label: "Maximize call %" },
+  { id: "put_pct", label: "Maximize put %" },
+];
 
 export const DEFAULT_PARAMS: GmaParams = {
   fastLength: 30,
