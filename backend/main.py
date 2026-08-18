@@ -53,6 +53,14 @@ def _finite(value: float) -> float | None:
     return float(value)
 
 
+def _json_default(value):
+    if isinstance(value, (np.floating, np.integer)):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def _chart_payload(symbol: str, timeframe: str, params: GmaParams, refresh: bool) -> dict:
     try:
         parse_spec(timeframe)
@@ -295,13 +303,25 @@ async def optimize(
         except Exception as exc:
             on_progress({"type": "error", "detail": f"Optimize failed: {exc}"})
 
+    def _sse(event: dict) -> str:
+        try:
+            payload = json.dumps(event, allow_nan=False, default=_json_default)
+        except (TypeError, ValueError) as exc:
+            payload = json.dumps({"type": "error", "detail": f"Optimize result not serializable: {exc}"})
+        return f"data: {payload}\n\n"
+
     async def generate():
         worker = asyncio.create_task(asyncio.to_thread(run))
         try:
             while True:
-                event = await queue.get()
-                yield f"data: {json.dumps(event)}\n\n"
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                    continue
+                yield _sse(event)
                 if event.get("type") in ("done", "error"):
+                    yield ": bye\n\n"
                     break
         finally:
             await worker

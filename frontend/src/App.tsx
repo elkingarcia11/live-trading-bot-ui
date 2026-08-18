@@ -106,7 +106,6 @@ export default function App() {
       if (!nextSymbol || !nextTf || optimizingRef.current) return;
       const requestId = ++requestRef.current;
       setBusy(true);
-      setError(null);
       try {
         const data = await fetchChart(nextSymbol, nextTf, nextParams, refresh);
         if (requestId !== requestRef.current || optimizingRef.current) return;
@@ -117,6 +116,7 @@ export default function App() {
         setPath(data.path);
         setSource(data.source);
         setStatus("live");
+        setError(null);
       } catch (err) {
         if (requestId !== requestRef.current || optimizingRef.current) return;
         setError(err instanceof Error ? err.message : String(err));
@@ -142,10 +142,10 @@ export default function App() {
       try {
         const result = await streamOptimize(symbol, metric, setOptimizeProgress);
         const nextParams: GmaParams = {
-          fastLength: result.params.fast_length,
-          fastSigma: result.params.fast_sigma,
-          slowLength: result.params.slow_length,
-          slowSigma: result.params.slow_sigma,
+          fastLength: Number(result.params.fast_length),
+          fastSigma: Number(result.params.fast_sigma),
+          slowLength: Number(result.params.slow_length),
+          slowSigma: Number(result.params.slow_sigma),
         };
         setTimeframe("");
         setAggregate(result.timeframe);
@@ -159,7 +159,9 @@ export default function App() {
             `put WR ${formatWinRateLine(result.put_win_rate, result.put_wins, result.close_puts)} ${formatPct(result.put_profit_pct)}`
         );
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        const message = err instanceof Error ? err.message : String(err);
+        setError(message);
+        setOptimizeNote(`Failed · ${message}`);
       } finally {
         setOptimizing(null);
         setOptimizeProgress(null);
@@ -189,13 +191,13 @@ export default function App() {
 
   const pairRef = useRef("");
   useEffect(() => {
-    if (locked || !symbol || !effectiveTf) return;
+    if (optimizingRef.current || !symbol || !effectiveTf) return;
     const pair = `${symbol}|${effectiveTf}`;
     const refresh = pairRef.current !== pair;
     pairRef.current = pair;
     if (refresh) setStatus("loading");
     loadChart(refresh, symbol, effectiveTf, params).catch(() => undefined);
-  }, [symbol, effectiveTf, params, loadChart, locked]);
+  }, [symbol, effectiveTf, params, loadChart]);
 
   useEffect(() => {
     if (locked || !symbol || !effectiveTf) return;

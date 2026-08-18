@@ -51,50 +51,6 @@ export function fetchMeta(symbol: string, timeframe: string) {
   );
 }
 
-export async function streamOptimize(
-  symbol: string,
-  metric: OptimizeMetric,
-  onProgress: (progress: OptimizeProgress) => void
-) {
-  const q = new URLSearchParams({ symbol, metric });
-  const response = await fetch(`/api/optimize?${q.toString()}`);
-  if (!response.ok) {
-    return readJson<never>(response);
-  }
-  if (!response.body) {
-    throw new Error("Optimize stream unavailable");
-  }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let sep = buf.indexOf("\n\n");
-    while (sep >= 0) {
-      const chunk = buf.slice(0, sep);
-      buf = buf.slice(sep + 2);
-      const dataLine = chunk.split("\n").find((line) => line.startsWith("data:"));
-      if (dataLine) {
-        const payload = JSON.parse(dataLine.replace(/^data:\s?/, "")) as
-          | OptimizeProgress
-          | { type: "done"; result: OptimizeResult }
-          | { type: "error"; detail: string };
-        if (payload.type === "progress") {
-          onProgress(payload);
-        } else if (payload.type === "done") {
-          return payload.result;
-        } else if (payload.type === "error") {
-          throw new Error(payload.detail || "Optimize failed");
-        }
-      }
-      sep = buf.indexOf("\n\n");
-    }
-  }
-  throw new Error("Optimize stream ended early");
-}
-
 type OptimizeResult = {
   symbol: string;
   metric: OptimizeMetric;
@@ -123,6 +79,82 @@ type OptimizeResult = {
   bars: number;
   tested: number;
 };
+
+type OptimizeStreamEvent =
+  | OptimizeProgress
+  | { type: "done"; result: OptimizeResult }
+  | { type: "error"; detail: string };
+
+function parseOptimizeEvent(chunk: string): OptimizeStreamEvent | null {
+  const dataLine = chunk.split(/\r?\n/).find((line) => line.startsWith("data:"));
+  if (!dataLine) return null;
+  return JSON.parse(dataLine.replace(/^data:\s?/, "")) as OptimizeStreamEvent;
+}
+
+export async function streamOptimize(
+  symbol: string,
+  metric: OptimizeMetric,
+  onProgress: (progress: OptimizeProgress) => void
+) {
+  const q = new URLSearchParams({ symbol, metric });
+  const response = await fetch(`/api/optimize?${q.toString()}`, {
+    cache: "no-store",
+    headers: { Accept: "text/event-stream" },
+  });
+  if (!response.ok) {
+    return readJson<never>(response);
+  }
+  if (!response.body) {
+    throw new Error("Optimize stream unavailable");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+
+  const apply = (payload: OptimizeStreamEvent): OptimizeResult | null => {
+    if (payload.type === "progress") {
+      onProgress(payload);
+      return null;
+    }
+    if (payload.type === "done") return payload.result;
+    if (payload.type === "error") {
+      throw new Error(payload.detail || "Optimize failed");
+    }
+    return null;
+  };
+
+  const consume = (text: string): OptimizeResult | null => {
+    buf += text;
+    const parts = buf.split(/\r?\n\r?\n/);
+    buf = parts.pop() ?? "";
+    for (const chunk of parts) {
+      const payload = parseOptimizeEvent(chunk);
+      if (!payload) continue;
+      const result = apply(payload);
+      if (result) return result;
+    }
+    return null;
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      const flushed = consume(decoder.decode());
+      if (flushed) return flushed;
+      if (buf.trim()) {
+        const payload = parseOptimizeEvent(buf);
+        if (payload) {
+          const result = apply(payload);
+          if (result) return result;
+        }
+      }
+      break;
+    }
+    const result = consume(decoder.decode(value, { stream: true }));
+    if (result) return result;
+  }
+  throw new Error("Optimize stream ended early");
+}
 
 export function watchUrl(symbol: string, timeframe: string): string {
   const q = new URLSearchParams({ symbol, timeframe });
