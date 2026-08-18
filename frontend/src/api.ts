@@ -28,20 +28,20 @@ export function fetchCatalog(): Promise<CatalogResponse> {
   return fetch("/api/catalog").then((r) => readJson<CatalogResponse>(r));
 }
 
-type StreamEvent<T> =
-  | { type: "progress" }
+type StreamEvent<T, P extends { type: "progress" } = { type: "progress" }> =
+  | P
   | { type: "done"; result: T }
   | { type: "error"; detail: string };
 
-function parseSseEvent<T>(chunk: string): StreamEvent<T> | null {
+function parseSseEvent<T, P extends { type: "progress" }>(chunk: string): StreamEvent<T, P> | null {
   const dataLine = chunk.split(/\r?\n/).find((line) => line.startsWith("data:"));
   if (!dataLine) return null;
-  return JSON.parse(dataLine.replace(/^data:\s?/, "")) as StreamEvent<T>;
+  return JSON.parse(dataLine.replace(/^data:\s?/, "")) as StreamEvent<T, P>;
 }
 
-async function streamEvents<T>(
+async function streamEvents<T, P extends { type: "progress" }>(
   url: string,
-  onProgress: (progress: { type: "progress" } & Record<string, unknown>) => void
+  onProgress: (progress: P) => void
 ): Promise<T> {
   const response = await fetch(url, {
     cache: "no-store",
@@ -57,7 +57,7 @@ async function streamEvents<T>(
   const decoder = new TextDecoder();
   let buf = "";
 
-  const apply = (payload: StreamEvent<T>): T | null => {
+  const apply = (payload: StreamEvent<T, P>): T | null => {
     if (payload.type === "progress") {
       onProgress(payload);
       return null;
@@ -74,7 +74,7 @@ async function streamEvents<T>(
     const parts = buf.split(/\r?\n\r?\n/);
     buf = parts.pop() ?? "";
     for (const chunk of parts) {
-      const payload = parseSseEvent<T>(chunk);
+      const payload = parseSseEvent<T, P>(chunk);
       if (!payload) continue;
       const result = apply(payload);
       if (result) return result;
@@ -88,7 +88,7 @@ async function streamEvents<T>(
       const flushed = consume(decoder.decode());
       if (flushed) return flushed;
       if (buf.trim()) {
-        const payload = parseSseEvent<T>(buf);
+        const payload = parseSseEvent<T, P>(buf);
         if (payload) {
           const result = apply(payload);
           if (result) return result;
@@ -114,9 +114,9 @@ export function streamChart(
     timeframe,
     refresh: refresh ? "true" : "false",
   });
-  return streamEvents<ChartResponse>(
+  return streamEvents<ChartResponse, LoadProgress>(
     `/api/chart?${q.toString()}&${query(params)}`,
-    (progress) => onProgress(progress as LoadProgress)
+    onProgress
   );
 }
 
@@ -163,9 +163,7 @@ export async function streamOptimize(
   onProgress: (progress: OptimizeProgress) => void
 ) {
   const q = new URLSearchParams({ symbol, timeframe, metric });
-  return streamEvents<OptimizeResult>(`/api/optimize?${q.toString()}`, (progress) =>
-    onProgress(progress as OptimizeProgress)
-  );
+  return streamEvents<OptimizeResult, OptimizeProgress>(`/api/optimize?${q.toString()}`, onProgress);
 }
 
 export function watchUrl(symbol: string, timeframe: string): string {
