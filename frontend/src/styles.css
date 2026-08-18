@@ -244,6 +244,7 @@ input[type="range"] {
 .legend div {
   justify-content: flex-start;
   gap: 8px;
+  line-height: 1.35;
 }
 
 .swatch {
@@ -251,6 +252,7 @@ input[type="range"] {
   height: 10px;
   display: inline-block;
   border-radius: 1px;
+  flex-shrink: 0;
 }
 
 .swatch.fast { background: var(--fast); }
@@ -260,6 +262,7 @@ input[type="range"] {
   display: inline-block;
   width: 0;
   height: 0;
+  flex-shrink: 0;
   border-left: 5px solid transparent;
   border-right: 5px solid transparent;
 }
@@ -270,6 +273,25 @@ input[type="range"] {
 
 .arrow.sell {
   border-top: 9px solid var(--sell);
+}
+
+.optimize-progress {
+  margin-bottom: 10px;
+}
+
+.optimize-progress .bar {
+  height: 4px;
+  margin-top: 8px;
+  background: #1b2836;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.optimize-progress .bar > span {
+  display: block;
+  height: 100%;
+  background: var(--fast);
+  transition: width 0.25s ease;
 }
 
 .stats dl {

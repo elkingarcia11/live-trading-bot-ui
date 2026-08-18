@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from itertools import product
+from typing import Callable
 
 import numpy as np
 
@@ -176,7 +178,24 @@ def _better(metric: str, cand: Trial, best: Trial | None) -> bool:
     return _metric_value(cand, metric) > _metric_value(best, metric)
 
 
-def search_timeframe(timeframe: str, close: np.ndarray, metric: str) -> tuple[Trial | None, int]:
+ProgressFn = Callable[[dict], None]
+
+
+def _config_count(n: int) -> int:
+    return sum(1 for length in LENGTHS for _sigma in SIGMAS if length <= n)
+
+
+def _emit(on_progress: ProgressFn | None, payload: dict) -> None:
+    if on_progress is not None:
+        on_progress(payload)
+
+
+def search_timeframe(
+    timeframe: str,
+    close: np.ndarray,
+    metric: str,
+    on_tick: Callable[[int], None] | None = None,
+) -> tuple[Trial | None, int]:
     n = close.size
     configs: list[tuple[int, float, np.ndarray]] = []
     for length, sigma in product(LENGTHS, SIGMAS):
@@ -187,6 +206,7 @@ def search_timeframe(timeframe: str, close: np.ndarray, metric: str) -> tuple[Tr
     best: Trial | None = None
     tested = 0
     k = len(configs)
+    last_tick = 0.0
     for i in range(k):
         flen, fsig, fast = configs[i]
         for j in range(k):
@@ -194,6 +214,10 @@ def search_timeframe(timeframe: str, close: np.ndarray, metric: str) -> tuple[Tr
                 continue
             slen, ssig, slow = configs[j]
             tested += 1
+            now = time.perf_counter()
+            if on_tick is not None and now - last_tick >= 0.35:
+                last_tick = now
+                on_tick(tested)
             if max(flen, slen) + 2 > n:
                 continue
             f1, f0 = fast[1:], fast[:-1]
@@ -242,22 +266,86 @@ def search_timeframe(timeframe: str, close: np.ndarray, metric: str) -> tuple[Tr
             )
             if _better(metric, trial, best):
                 best = trial
+    if on_tick is not None:
+        on_tick(tested)
     return best, tested
 
 
-def optimize(symbol: str, metric: str, load_close) -> dict:
+def optimize(
+    symbol: str,
+    metric: str,
+    load_close,
+    on_progress: ProgressFn | None = None,
+) -> dict:
     if metric not in METRICS:
         raise ValueError(f"metric must be one of {sorted(METRICS)}")
-    overall: Trial | None = None
-    tested = 0
-    frames = 0
-    for spec in PRESETS:
+    started = time.perf_counter()
+    jobs: list[tuple[str, np.ndarray, int]] = []
+    for index, spec in enumerate(PRESETS, start=1):
+        _emit(
+            on_progress,
+            {
+                "type": "progress",
+                "pct": 0.0,
+                "elapsed_s": round(time.perf_counter() - started, 1),
+                "eta_s": None,
+                "timeframe": spec,
+                "frame": index,
+                "frames": len(PRESETS),
+                "tested": 0,
+                "total": 0,
+                "message": f"Loading {spec}",
+            },
+        )
         close = load_close(spec)
         if close is None or close.size < MIN_TRADES + 2:
             continue
+        k = _config_count(int(close.size))
+        pairs = k * (k - 1) if k > 1 else 0
+        jobs.append((spec, close, pairs))
+
+    work_total = max(sum(pairs for _spec, _close, pairs in jobs), 1)
+    work_done = 0
+    overall: Trial | None = None
+    tested = 0
+    frames = 0
+
+    def report(spec: str, frame: int, frame_tested: int, message: str) -> None:
+        done = min(work_done + frame_tested, work_total)
+        elapsed = time.perf_counter() - started
+        eta = None
+        if done > 0 and elapsed > 0:
+            eta = (work_total - done) * (elapsed / done)
+        _emit(
+            on_progress,
+            {
+                "type": "progress",
+                "pct": round(100.0 * done / work_total, 1),
+                "elapsed_s": round(elapsed, 1),
+                "eta_s": None if eta is None else round(eta, 1),
+                "timeframe": spec,
+                "frame": frame,
+                "frames": len(jobs),
+                "tested": done,
+                "total": work_total,
+                "message": message,
+            },
+        )
+
+    for index, (spec, close, _pairs) in enumerate(jobs, start=1):
         frames += 1
-        best, n_tested = search_timeframe(spec, close, metric)
+        report(spec, index, 0, f"Searching {spec}")
+        best, n_tested = search_timeframe(
+            spec,
+            close,
+            metric,
+            on_tick=lambda n, spec=spec, index=index: report(
+                spec, index, n, f"Searching {spec}"
+            ),
+        )
         tested += n_tested
+        work_done += n_tested
+        report(spec, index, 0, f"Finished {spec}")
         if best is not None and _better(metric, best, overall):
             overall = best
     if overall is None:

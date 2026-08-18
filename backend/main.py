@@ -232,7 +232,7 @@ def refresh(
 
 
 @app.get("/api/optimize")
-def optimize(
+async def optimize(
     symbol: str = Query(..., min_length=1),
     metric: Literal[
         "total_profit",
@@ -243,7 +243,10 @@ def optimize(
         "put_pct",
     ] = Query(...),
     refresh: bool = False,
-) -> dict:
+):
+    queue: asyncio.Queue[dict] = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
     def load_close(spec: str):
         try:
             entry = store.get(symbol, spec, refresh=refresh)
@@ -255,16 +258,43 @@ def optimize(
             return None
         return entry.frame["close"].to_numpy(dtype=np.float64)
 
-    try:
-        return run_optimize(symbol, metric, load_close)
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Optimize failed: {exc}") from exc
+    def on_progress(event: dict) -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, event)
+
+    def run() -> None:
+        try:
+            result = run_optimize(symbol, metric, load_close, on_progress=on_progress)
+            on_progress({"type": "done", "result": result})
+        except LookupError as exc:
+            on_progress({"type": "error", "detail": str(exc)})
+        except ValueError as exc:
+            on_progress({"type": "error", "detail": str(exc)})
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+            on_progress({"type": "error", "detail": detail})
+        except Exception as exc:
+            on_progress({"type": "error", "detail": f"Optimize failed: {exc}"})
+
+    async def generate():
+        worker = asyncio.create_task(asyncio.to_thread(run))
+        try:
+            while True:
+                event = await queue.get()
+                yield f"data: {json.dumps(event)}\n\n"
+                if event.get("type") in ("done", "error"):
+                    break
+        finally:
+            await worker
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/events")

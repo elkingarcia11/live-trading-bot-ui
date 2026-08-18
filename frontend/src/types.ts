@@ -66,6 +66,19 @@ export const OPTIMIZE_OPTIONS: { id: OptimizeMetric; label: string }[] = [
   { id: "put_pct", label: "Maximize put %" },
 ];
 
+export interface OptimizeProgress {
+  type: "progress";
+  pct: number;
+  elapsed_s: number;
+  eta_s: number | null;
+  timeframe: string;
+  frame: number;
+  frames: number;
+  tested: number;
+  total: number;
+  message: string;
+}
+
 export const DEFAULT_PARAMS: GmaParams = {
   fastLength: 30,
   fastSigma: 7,

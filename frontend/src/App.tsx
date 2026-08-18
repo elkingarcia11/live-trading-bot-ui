@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Chart, { CHART_ZONES, formatChartTime, type ChartZone } from "./Chart";
-import { fetchCatalog, fetchChart, fetchMeta, fetchOptimize, watchUrl } from "./api";
-import { DEFAULT_PARAMS, OPTIMIZE_OPTIONS, type Bar, type GmaParams, type OptimizeMetric } from "./types";
+import { fetchCatalog, fetchChart, fetchMeta, streamOptimize, watchUrl } from "./api";
+import { DEFAULT_PARAMS, OPTIMIZE_OPTIONS, type Bar, type GmaParams, type OptimizeMetric, type OptimizeProgress } from "./types";
 
 import { computeTradeStats, formatActions, formatPct, formatPoints, formatWinRateLine, isUpAction, withActions } from "./tradeStats";
 
@@ -15,6 +15,24 @@ function formatPrice(value: number | null | undefined): string {
 function formatClock(iso: string | null, zone: ChartZone): string {
   if (!iso) return "—";
   return formatChartTime(Math.floor(new Date(iso).getTime() / 1000), zone, true);
+}
+
+function formatEta(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds)) return "calculating…";
+  const s = Math.max(0, Math.ceil(seconds));
+  if (s < 60) return `~${s}s left`;
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return r ? `~${m}m ${r}s left` : `~${m}m left`;
+}
+
+function optimizeStatus(progress: OptimizeProgress | null, metric: OptimizeMetric | null): string {
+  if (!metric) return "Select target";
+  const goal = OPTIMIZE_OPTIONS.find((item) => item.id === metric)?.label ?? "Search";
+  if (!progress) return `${goal} · starting…`;
+  if (progress.total <= 0) return `${goal} · ${progress.message}…`;
+  const pctLeft = Math.max(0, Math.round(100 - progress.pct));
+  return `${goal} · ${progress.message} (${progress.frame}/${progress.frames}) · ${Math.round(progress.pct)}% · ${pctLeft}% left · ${formatEta(progress.eta_s)}`;
 }
 
 export default function App() {
@@ -38,7 +56,9 @@ export default function App() {
   const [status, setStatus] = useState<"idle" | "loading" | "live" | "stale">("idle");
   const [busy, setBusy] = useState(false);
   const [optimizing, setOptimizing] = useState<OptimizeMetric | null>(null);
+  const [optimizeTarget, setOptimizeTarget] = useState<OptimizeMetric | "">("");
   const [optimizeNote, setOptimizeNote] = useState<string | null>(null);
+  const [optimizeProgress, setOptimizeProgress] = useState<OptimizeProgress | null>(null);
   const fingerprintRef = useRef("");
   const paramsRef = useRef(params);
   const requestRef = useRef(0);
@@ -106,11 +126,13 @@ export default function App() {
   const runOptimize = useCallback(
     async (metric: OptimizeMetric) => {
       if (!symbol || optimizing) return;
+      setOptimizeTarget(metric);
       setOptimizing(metric);
       setError(null);
       setOptimizeNote(null);
+      setOptimizeProgress(null);
       try {
-        const result = await fetchOptimize(symbol, metric);
+        const result = await streamOptimize(symbol, metric, setOptimizeProgress);
         const nextParams: GmaParams = {
           fastLength: result.params.fast_length,
           fastSigma: result.params.fast_sigma,
@@ -132,6 +154,7 @@ export default function App() {
         setError(err instanceof Error ? err.message : String(err));
       } finally {
         setOptimizing(null);
+        setOptimizeProgress(null);
       }
     },
     [symbol, optimizing]
@@ -208,7 +231,14 @@ export default function App() {
         </div>
         <label className="field">
           <span>Symbol</span>
-          <select value={symbol} onChange={(e) => setSymbol(e.target.value)} disabled={!symbols.length}>
+          <select
+            value={symbol}
+            onChange={(e) => {
+              setSymbol(e.target.value);
+              setOptimizeTarget("");
+            }}
+            disabled={!symbols.length}
+          >
             {symbols.length === 0 && <option value="">No symbols</option>}
             {symbols.map((item) => (
               <option key={item} value={item}>
@@ -273,14 +303,24 @@ export default function App() {
         <label className="field">
           <span>Optimize</span>
           <select
-            value=""
+            value={optimizing ? "" : optimizeTarget}
             disabled={!symbol || !hasTrades[symbol] || optimizing != null}
             onChange={(e) => {
-              const next = e.target.value as OptimizeMetric;
-              if (next) runOptimize(next);
+              const next = e.target.value as OptimizeMetric | "";
+              if (!next) {
+                setOptimizeTarget("");
+                return;
+              }
+              runOptimize(next);
             }}
           >
-            <option value="">{optimizing ? "Searching…" : "Select target"}</option>
+            <option value="">
+              {optimizing
+                ? optimizeProgress?.total
+                  ? `${Math.round(optimizeProgress.pct)}% · ${formatEta(optimizeProgress.eta_s)}`
+                  : optimizeProgress?.message ?? "Searching…"
+                : "Select target"}
+            </option>
             {OPTIMIZE_OPTIONS.map((item) => (
               <option key={item.id} value={item.id}>
                 {item.label}
@@ -387,11 +427,19 @@ export default function App() {
           <h2>Legend</h2>
           <div><i className="swatch fast" /> Fast GMA</div>
           <div><i className="swatch slow" /> Slow GMA</div>
-          <div><i className="arrow buy" /></div>
-          <div><i className="arrow sell" /></div>
+          <div><i className="arrow buy" /> Open call / close put</div>
+          <div><i className="arrow sell" /> Open put / close call</div>
         </section>
         <section className="stats">
           <h2>Session</h2>
+          {optimizing && (
+            <div className="optimize-progress">
+              <p className="hint">{optimizeStatus(optimizeProgress, optimizing)}</p>
+              <div className="bar">
+                <span style={{ width: `${Math.min(100, Math.max(2, optimizeProgress?.pct ?? 1))}%` }} />
+              </div>
+            </div>
+          )}
           {optimizeNote && <p className="hint">{optimizeNote}</p>}
           {bars.length < Math.max(params.fastLength, params.slowLength) && (
             <p className="hint">
