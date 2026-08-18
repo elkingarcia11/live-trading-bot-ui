@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Chart, { CHART_ZONES, formatChartTime, type ChartZone } from "./Chart";
 import { fetchCatalog, fetchChart, fetchMeta, streamOptimize, watchUrl } from "./api";
-import { DEFAULT_PARAMS, OPTIMIZE_OPTIONS, type Bar, type GmaParams, type OptimizeMetric, type OptimizeProgress } from "./types";
+import { DEFAULT_PARAMS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_SIGMA_MAX, GMA_SIGMA_MIN, OPTIMIZE_OPTIONS, gmaScale, isValidGmaPair, type Bar, type GmaParams, type OptimizeMetric, type OptimizeProgress } from "./types";
 
 import { computeTradeStats, formatActions, formatPct, formatPoints, formatWinRateLine, isUpAction, withActions } from "./tradeStats";
 
@@ -62,7 +62,9 @@ export default function App() {
   const fingerprintRef = useRef("");
   const paramsRef = useRef(params);
   const requestRef = useRef(0);
+  const optimizingRef = useRef(false);
   paramsRef.current = params;
+  const locked = optimizing != null;
 
   const symbols = useMemo(() => Object.keys(catalog).sort(), [catalog]);
   const timeframes = catalog[symbol] ?? [];
@@ -71,6 +73,9 @@ export default function App() {
   const last = bars.at(-1) ?? null;
   const labeledBars = useMemo(() => withActions(bars), [bars]);
   const tradeStats = useMemo(() => computeTradeStats(labeledBars), [labeledBars]);
+  const fastScale = gmaScale(draft.fastLength, draft.fastSigma);
+  const slowScale = gmaScale(draft.slowLength, draft.slowSigma);
+  const gmaPairOk = isValidGmaPair(draft);
 
   const loadCatalog = useCallback(async () => {
     const data = await fetchCatalog();
@@ -98,13 +103,13 @@ export default function App() {
       nextTf = effectiveTf,
       nextParams = paramsRef.current
     ) => {
-      if (!nextSymbol || !nextTf) return;
+      if (!nextSymbol || !nextTf || optimizingRef.current) return;
       const requestId = ++requestRef.current;
       setBusy(true);
       setError(null);
       try {
         const data = await fetchChart(nextSymbol, nextTf, nextParams, refresh);
-        if (requestId !== requestRef.current) return;
+        if (requestId !== requestRef.current || optimizingRef.current) return;
         fingerprintRef.current = data.fingerprint;
         setBars(data.bars);
         setUpdated(data.updated);
@@ -113,7 +118,7 @@ export default function App() {
         setSource(data.source);
         setStatus("live");
       } catch (err) {
-        if (requestId !== requestRef.current) return;
+        if (requestId !== requestRef.current || optimizingRef.current) return;
         setError(err instanceof Error ? err.message : String(err));
         setStatus("stale");
       } finally {
@@ -125,7 +130,10 @@ export default function App() {
 
   const runOptimize = useCallback(
     async (metric: OptimizeMetric) => {
-      if (!symbol || optimizing) return;
+      if (!symbol || optimizingRef.current) return;
+      optimizingRef.current = true;
+      requestRef.current += 1;
+      setBusy(false);
       setOptimizeTarget(metric);
       setOptimizing(metric);
       setError(null);
@@ -155,9 +163,10 @@ export default function App() {
       } finally {
         setOptimizing(null);
         setOptimizeProgress(null);
+        optimizingRef.current = false;
       }
     },
-    [symbol, optimizing]
+    [symbol]
   );
 
   useEffect(() => {
@@ -167,27 +176,29 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (locked) return;
     const timer = window.setTimeout(() => setParams(draft), 180);
     return () => window.clearTimeout(timer);
-  }, [draft]);
+  }, [draft, locked]);
 
   useEffect(() => {
+    if (locked) return;
     const timer = window.setTimeout(() => setCustomSpec(customDraft.trim()), 400);
     return () => window.clearTimeout(timer);
-  }, [customDraft]);
+  }, [customDraft, locked]);
 
   const pairRef = useRef("");
   useEffect(() => {
-    if (!symbol || !effectiveTf) return;
+    if (locked || !symbol || !effectiveTf) return;
     const pair = `${symbol}|${effectiveTf}`;
     const refresh = pairRef.current !== pair;
     pairRef.current = pair;
     if (refresh) setStatus("loading");
     loadChart(refresh, symbol, effectiveTf, params).catch(() => undefined);
-  }, [symbol, effectiveTf, params, loadChart]);
+  }, [symbol, effectiveTf, params, loadChart, locked]);
 
   useEffect(() => {
-    if (!symbol || !effectiveTf) return;
+    if (locked || !symbol || !effectiveTf) return;
     const sourceStream = new EventSource(watchUrl(symbol, effectiveTf));
     sourceStream.onmessage = (event) => {
       try {
@@ -195,7 +206,11 @@ export default function App() {
           type: string;
           fingerprint?: string;
         };
-        if (payload.type === "update" && payload.fingerprint !== fingerprintRef.current) {
+        if (
+          !optimizingRef.current &&
+          payload.type === "update" &&
+          payload.fingerprint !== fingerprintRef.current
+        ) {
           loadChart(true).catch(() => undefined);
         }
       } catch {
@@ -203,14 +218,20 @@ export default function App() {
       }
     };
     sourceStream.onerror = () => {
+      if (optimizingRef.current) return;
       if (sourceStream.readyState === EventSource.CLOSED) {
         setStatus((prev) => (prev === "loading" ? prev : "stale"));
       }
     };
     const poll = window.setInterval(() => {
+      if (optimizingRef.current) return;
       fetchMeta(symbol, effectiveTf)
         .then((meta) => {
-          if (meta.fingerprint && meta.fingerprint !== fingerprintRef.current) {
+          if (
+            !optimizingRef.current &&
+            meta.fingerprint &&
+            meta.fingerprint !== fingerprintRef.current
+          ) {
             loadChart(true).catch(() => undefined);
           }
         })
@@ -220,7 +241,17 @@ export default function App() {
       sourceStream.close();
       window.clearInterval(poll);
     };
-  }, [symbol, effectiveTf, loadChart]);
+  }, [symbol, effectiveTf, loadChart, locked]);
+
+  useEffect(() => {
+    if (!locked) return;
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [locked]);
 
   return (
     <div className="app">
@@ -237,7 +268,7 @@ export default function App() {
               setSymbol(e.target.value);
               setOptimizeTarget("");
             }}
-            disabled={!symbols.length}
+            disabled={locked || !symbols.length}
           >
             {symbols.length === 0 && <option value="">No symbols</option>}
             {symbols.map((item) => (
@@ -256,7 +287,7 @@ export default function App() {
               setTimeframe(next);
               if (next) setAggregate("");
             }}
-            disabled={!timeframes.length}
+            disabled={locked || !timeframes.length}
           >
             <option value="">Select timeframe</option>
             {timeframes.map((item) => (
@@ -276,7 +307,7 @@ export default function App() {
               setAggregate(next);
               if (next) setTimeframe("");
             }}
-            disabled={!hasTrades[symbol]}
+            disabled={locked || !hasTrades[symbol]}
           >
             <option value="">Select aggregate</option>
             {aggregates.map((item) => (
@@ -294,6 +325,7 @@ export default function App() {
               type="text"
               className="spec"
               value={customDraft}
+              disabled={locked}
               placeholder="100t or 5m"
               onChange={(e) => setCustomDraft(e.target.value)}
             />
@@ -332,34 +364,44 @@ export default function App() {
           className="refresh"
           type="button"
           onClick={() => loadChart(true)}
-          disabled={busy || !symbol || !effectiveTf}
+          disabled={locked || busy || !symbol || !effectiveTf}
         >
-          {busy ? "Pulling…" : "Refresh GCS"}
+          {locked ? "Locked" : busy ? "Pulling…" : "Refresh GCS"}
         </button>
-        <div className={`live-pill ${status}`}>
+        <div className={`live-pill ${locked ? "paused" : status}`}>
           <span className="dot" />
-          {status === "live" ? "Listening" : status === "loading" ? "Loading" : status === "stale" ? "Reconnect" : "Idle"}
+          {locked
+            ? "Paused"
+            : status === "live"
+              ? "Listening"
+              : status === "loading"
+                ? "Loading"
+                : status === "stale"
+                  ? "Reconnect"
+                  : "Idle"}
         </div>
       </header>
 
       <aside className="sidebar">
         <section>
           <h2>Fast GMA</h2>
-          <p className="hint">Length {draft.fastLength} · σ {draft.fastSigma.toFixed(1)}</p>
+          <p className="hint">EMA 3 · Length {draft.fastLength} · σ {draft.fastSigma.toFixed(1)} · L/σ {fastScale.toFixed(2)}</p>
           <label>
             Length
             <input
               type="range"
-              min={2}
-              max={200}
+              min={GMA_LENGTH_MIN}
+              max={GMA_LENGTH_MAX}
               value={draft.fastLength}
+              disabled={locked}
               onChange={(e) => setDraft({ ...draft, fastLength: Number(e.target.value) })}
             />
             <input
               type="number"
-              min={2}
-              max={500}
+              min={GMA_LENGTH_MIN}
+              max={GMA_LENGTH_MAX}
               value={draft.fastLength}
+              disabled={locked}
               onChange={(e) => setDraft({ ...draft, fastLength: Number(e.target.value) })}
             />
           </label>
@@ -367,39 +409,43 @@ export default function App() {
             Sigma
             <input
               type="range"
-              min={1}
-              max={10}
+              min={GMA_SIGMA_MIN}
+              max={GMA_SIGMA_MAX}
               step={0.5}
               value={draft.fastSigma}
+              disabled={locked}
               onChange={(e) => setDraft({ ...draft, fastSigma: Number(e.target.value) })}
             />
             <input
               type="number"
-              min={1}
-              max={50}
+              min={GMA_SIGMA_MIN}
+              max={GMA_SIGMA_MAX}
               step={0.5}
               value={draft.fastSigma}
+              disabled={locked}
               onChange={(e) => setDraft({ ...draft, fastSigma: Number(e.target.value) })}
             />
           </label>
         </section>
         <section>
           <h2>Slow GMA</h2>
-          <p className="hint">Length {draft.slowLength} · σ {draft.slowSigma.toFixed(1)}</p>
+          <p className="hint">SMA 3 · Length {draft.slowLength} · σ {draft.slowSigma.toFixed(1)} · L/σ {slowScale.toFixed(2)}</p>
           <label>
             Length
             <input
               type="range"
-              min={2}
-              max={200}
+              min={GMA_LENGTH_MIN}
+              max={GMA_LENGTH_MAX}
               value={draft.slowLength}
+              disabled={locked}
               onChange={(e) => setDraft({ ...draft, slowLength: Number(e.target.value) })}
             />
             <input
               type="number"
-              min={2}
-              max={500}
+              min={GMA_LENGTH_MIN}
+              max={GMA_LENGTH_MAX}
               value={draft.slowLength}
+              disabled={locked}
               onChange={(e) => setDraft({ ...draft, slowLength: Number(e.target.value) })}
             />
           </label>
@@ -407,26 +453,31 @@ export default function App() {
             Sigma
             <input
               type="range"
-              min={1}
-              max={10}
+              min={GMA_SIGMA_MIN}
+              max={GMA_SIGMA_MAX}
               step={0.5}
               value={draft.slowSigma}
+              disabled={locked}
               onChange={(e) => setDraft({ ...draft, slowSigma: Number(e.target.value) })}
             />
             <input
               type="number"
-              min={1}
-              max={50}
+              min={GMA_SIGMA_MIN}
+              max={GMA_SIGMA_MAX}
               step={0.5}
               value={draft.slowSigma}
+              disabled={locked}
               onChange={(e) => setDraft({ ...draft, slowSigma: Number(e.target.value) })}
             />
           </label>
+          {!gmaPairOk && (
+            <p className="hint warn">Invalid pair: fast L/σ must be less than slow L/σ</p>
+          )}
         </section>
         <section className="legend">
           <h2>Legend</h2>
-          <div><i className="swatch fast" /> Fast GMA</div>
-          <div><i className="swatch slow" /> Slow GMA</div>
+          <div><i className="swatch fast" /> Fast GMA (EMA 3)</div>
+          <div><i className="swatch slow" /> Slow GMA (SMA 3)</div>
           <div><i className="arrow buy" /> Open call / close put</div>
           <div><i className="arrow sell" /> Open put / close call</div>
         </section>
@@ -538,6 +589,11 @@ export default function App() {
 
       <main className="stage">
         {error && <div className="banner">{error}</div>}
+        {locked && (
+          <div className="chart-lock">
+            <span>Chart frozen until optimization finishes</span>
+          </div>
+        )}
         <Chart bars={labeledBars} fitKey={`${symbol}|${effectiveTf}`} timeZone={chartZone} />
       </main>
 

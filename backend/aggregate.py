@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from backend.gma import EMA_COL, SMA_COL, SOURCE_PERIOD, ema, sma
 import pandas as pd
 
 SPEC_RE = re.compile(r"^(\d+)(t|s|m|h)$", re.IGNORECASE)
@@ -37,8 +38,22 @@ def aggregate_trades(trades: pd.DataFrame, spec: str) -> pd.DataFrame:
     if frame.empty:
         return _empty_ohlcv()
     if kind == "tick":
-        return _tick_bars(frame, size)
-    return _time_bars(frame, size)
+        bars = _tick_bars(frame, size)
+    else:
+        bars = _time_bars(frame, size)
+    return attach_source_mas(bars)
+
+
+def attach_source_mas(frame: pd.DataFrame) -> pd.DataFrame:
+    """Compute EMA(3) and SMA(3) once on close for chart/optimize reuse."""
+    if frame.empty or "close" not in frame.columns:
+        return frame
+    close = frame["close"].to_numpy(dtype="float64")
+    if EMA_COL not in frame.columns:
+        frame[EMA_COL] = ema(close, SOURCE_PERIOD)
+    if SMA_COL not in frame.columns:
+        frame[SMA_COL] = sma(close, SOURCE_PERIOD)
+    return frame
 
 
 def _prepare_trades(trades: pd.DataFrame) -> pd.DataFrame:
@@ -96,7 +111,7 @@ def _time_bars(trades: pd.DataFrame, seconds: int) -> pd.DataFrame:
 
 
 def _empty_ohlcv() -> pd.DataFrame:
-    return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+    return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", EMA_COL, SMA_COL])
 
 
 def _empty_trades() -> pd.DataFrame:

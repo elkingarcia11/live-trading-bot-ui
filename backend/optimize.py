@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from itertools import product
+from threading import Lock
 from typing import Callable
 
 import numpy as np
@@ -12,10 +15,10 @@ import numpy as np
 from backend.aggregate import PRESETS
 from backend.gma import gaussian_ma
 
-# Matches the sidebar sliders: length 2–200, sigma 1–10 step 0.5.
-LENGTHS = [
-    2, 4, 6, 8, 10, 12, 15, 18, 20, 25, 30, 35, 40, 50, 60, 80, 100, 125, 150, 200
-]
+# Length 5–30 every integer; above 30 only multiples of 5. Sigma 1–10 step 0.5.
+# Fast vs slow is length/sigma, not raw length: a valid pair has
+# (fast_length / fast_sigma) < (slow_length / slow_sigma).
+LENGTHS = list(range(5, 31)) + list(range(35, 101, 5))
 SIGMAS = [round(x * 0.5, 1) for x in range(2, 21)]  # 1.0 .. 10.0
 MIN_TRADES = 3
 
@@ -151,17 +154,20 @@ def score_events(
 
 
 def _metric_value(trial: Trial, metric: str) -> tuple[float, float, int]:
+    """Primary metric, then total profit % vs total win rate on ties."""
+    win_rate = round(trial.win_rate, 2)
+    profit_pct = round(trial.profit_pct, 4)
     if metric == "total_win_rate":
-        return trial.win_rate, trial.profit_pct, trial.closed
+        return win_rate, profit_pct, trial.closed
     if metric == "call_win_rate":
-        return trial.call_win_rate, trial.call_profit_pct, trial.close_calls
+        return round(trial.call_win_rate, 2), profit_pct, trial.close_calls
     if metric == "put_win_rate":
-        return trial.put_win_rate, trial.put_profit_pct, trial.close_puts
+        return round(trial.put_win_rate, 2), profit_pct, trial.close_puts
     if metric == "total_profit_pct":
-        return trial.profit_pct, trial.win_rate, trial.closed
+        return profit_pct, win_rate, trial.closed
     if metric == "call_profit_pct":
-        return trial.call_profit_pct, trial.call_win_rate, trial.close_calls
-    return trial.put_profit_pct, trial.put_win_rate, trial.close_puts
+        return round(trial.call_profit_pct, 4), win_rate, trial.close_calls
+    return round(trial.put_profit_pct, 4), win_rate, trial.close_puts
 
 
 def _enough_trades(metric: str, close_calls: int, close_puts: int, closed: int) -> bool:
@@ -178,11 +184,27 @@ def _better(metric: str, cand: Trial, best: Trial | None) -> bool:
     return _metric_value(cand, metric) > _metric_value(best, metric)
 
 
+@dataclass
+class FrameSeries:
+    close: np.ndarray
+    ema: np.ndarray
+    sma: np.ndarray
+
+
 ProgressFn = Callable[[dict], None]
 
 
-def _config_count(n: int) -> int:
-    return sum(1 for length in LENGTHS for _sigma in SIGMAS if length <= n)
+def _is_fast_slow(flen: int, fsig: float, slen: int, ssig: float) -> bool:
+    return flen / fsig < slen / ssig
+
+
+def _pair_count(n: int) -> int:
+    configs = [(length, sigma) for length, sigma in product(LENGTHS, SIGMAS) if length <= n]
+    return sum(
+        1
+        for (flen, fsig), (slen, ssig) in product(configs, configs)
+        if _is_fast_slow(flen, fsig, slen, ssig)
+    )
 
 
 def _emit(on_progress: ProgressFn | None, payload: dict) -> None:
@@ -190,34 +212,74 @@ def _emit(on_progress: ProgressFn | None, payload: dict) -> None:
         on_progress(payload)
 
 
-def search_timeframe(
-    timeframe: str,
-    close: np.ndarray,
-    metric: str,
-    on_tick: Callable[[int], None] | None = None,
-) -> tuple[Trial | None, int]:
-    n = close.size
+def _gma_configs(source: np.ndarray, n: int) -> list[tuple[int, float, np.ndarray]]:
     configs: list[tuple[int, float, np.ndarray]] = []
     for length, sigma in product(LENGTHS, SIGMAS):
         if length > n:
             continue
-        configs.append((length, sigma, gaussian_ma(close, length, sigma)))
+        configs.append((length, sigma, gaussian_ma(source, length, sigma)))
+    return configs
 
+
+def _worker_count(tasks: int) -> int:
+    if tasks <= 1:
+        return 1
+    cpus = os.cpu_count() or 1
+    return max(1, min(8, cpus, tasks))
+
+
+def _split(items: list, parts: int) -> list[list]:
+    if not items:
+        return []
+    parts = max(1, min(parts, len(items)))
+    size = (len(items) + parts - 1) // parts
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+class _TickCounter:
+    """Thread-safe pair counter for SSE progress. Ticks at most every 0.35s."""
+
+    def __init__(self, on_tick: Callable[[int], None] | None) -> None:
+        self._on_tick = on_tick
+        self._lock = Lock()
+        self.value = 0
+        self._last_tick = 0.0
+
+    def add(self, n: int) -> None:
+        if n <= 0:
+            return
+        tick_value: int | None = None
+        with self._lock:
+            self.value += n
+            now = time.perf_counter()
+            if self._on_tick is not None and now - self._last_tick >= 0.35:
+                self._last_tick = now
+                tick_value = self.value
+        if tick_value is not None:
+            self._on_tick(tick_value)
+
+
+def _search_fast_group(
+    timeframe: str,
+    close: np.ndarray,
+    n: int,
+    metric: str,
+    fast_group: list[tuple[int, float, np.ndarray]],
+    slow_configs: list[tuple[int, float, np.ndarray]],
+    ticks: _TickCounter,
+) -> tuple[Trial | None, int]:
     best: Trial | None = None
     tested = 0
-    k = len(configs)
-    last_tick = 0.0
-    for i in range(k):
-        flen, fsig, fast = configs[i]
-        for j in range(k):
-            if i == j:
+    pending = 0
+    for flen, fsig, fast in fast_group:
+        for slen, ssig, slow in slow_configs:
+            if not _is_fast_slow(flen, fsig, slen, ssig):
                 continue
-            slen, ssig, slow = configs[j]
             tested += 1
-            now = time.perf_counter()
-            if on_tick is not None and now - last_tick >= 0.35:
-                last_tick = now
-                on_tick(tested)
+            pending += 1
+            if pending >= 256:
+                ticks.add(pending)
+                pending = 0
             if max(flen, slen) + 2 > n:
                 continue
             f1, f0 = fast[1:], fast[:-1]
@@ -266,6 +328,56 @@ def search_timeframe(
             )
             if _better(metric, trial, best):
                 best = trial
+    ticks.add(pending)
+    return best, tested
+
+
+def search_timeframe(
+    timeframe: str,
+    series: FrameSeries,
+    metric: str,
+    on_tick: Callable[[int], None] | None = None,
+) -> tuple[Trial | None, int]:
+    close = series.close
+    n = close.size
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fast_fut = pool.submit(_gma_configs, series.ema, n)
+        slow_fut = pool.submit(_gma_configs, series.sma, n)
+        fast_configs = fast_fut.result()
+        slow_configs = slow_fut.result()
+
+    workers = _worker_count(len(fast_configs))
+    groups = _split(fast_configs, workers)
+    ticks = _TickCounter(on_tick)
+    best: Trial | None = None
+    tested = 0
+    if workers <= 1:
+        parts = [
+            _search_fast_group(
+                timeframe, close, n, metric, group, slow_configs, ticks
+            )
+            for group in groups
+        ]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [
+                pool.submit(
+                    _search_fast_group,
+                    timeframe,
+                    close,
+                    n,
+                    metric,
+                    group,
+                    slow_configs,
+                    ticks,
+                )
+                for group in groups
+            ]
+            parts = [fut.result() for fut in futures]
+    for cand, count in parts:
+        tested += count
+        if cand is not None and _better(metric, cand, best):
+            best = cand
     if on_tick is not None:
         on_tick(tested)
     return best, tested
@@ -274,13 +386,13 @@ def search_timeframe(
 def optimize(
     symbol: str,
     metric: str,
-    load_close,
+    load_series,
     on_progress: ProgressFn | None = None,
 ) -> dict:
     if metric not in METRICS:
         raise ValueError(f"metric must be one of {sorted(METRICS)}")
     started = time.perf_counter()
-    jobs: list[tuple[str, np.ndarray, int]] = []
+    jobs: list[tuple[str, FrameSeries, int]] = []
     for index, spec in enumerate(PRESETS, start=1):
         _emit(
             on_progress,
@@ -297,14 +409,18 @@ def optimize(
                 "message": f"Loading {spec}",
             },
         )
-        close = load_close(spec)
+        packed = load_series(spec)
+        if packed is None:
+            continue
+        close, ema_source, sma_source = packed
         if close is None or close.size < MIN_TRADES + 2:
             continue
-        k = _config_count(int(close.size))
-        pairs = k * (k - 1) if k > 1 else 0
-        jobs.append((spec, close, pairs))
+        if ema_source is None or sma_source is None:
+            continue
+        series = FrameSeries(close=close, ema=ema_source, sma=sma_source)
+        jobs.append((spec, series, _pair_count(int(close.size))))
 
-    work_total = max(sum(pairs for _spec, _close, pairs in jobs), 1)
+    work_total = max(sum(pairs for _spec, _series, pairs in jobs), 1)
     work_done = 0
     overall: Trial | None = None
     tested = 0
@@ -332,12 +448,12 @@ def optimize(
             },
         )
 
-    for index, (spec, close, _pairs) in enumerate(jobs, start=1):
+    for index, (spec, series, _pairs) in enumerate(jobs, start=1):
         frames += 1
         report(spec, index, 0, f"Searching {spec}")
         best, n_tested = search_timeframe(
             spec,
-            close,
+            series,
             metric,
             on_tick=lambda n, spec=spec, index=index: report(
                 spec, index, n, f"Searching {spec}"

@@ -49,6 +49,19 @@ export interface GmaParams {
   slowSigma: number;
 }
 
+export const GMA_LENGTH_MIN = 5;
+export const GMA_LENGTH_MAX = 100;
+export const GMA_SIGMA_MIN = 1;
+export const GMA_SIGMA_MAX = 10;
+
+export function gmaScale(length: number, sigma: number): number {
+  return length / sigma;
+}
+
+export function isValidGmaPair(params: GmaParams): boolean {
+  return gmaScale(params.fastLength, params.fastSigma) < gmaScale(params.slowLength, params.slowSigma);
+}
+
 export type OptimizeMetric =
   | "total_win_rate"
   | "call_win_rate"

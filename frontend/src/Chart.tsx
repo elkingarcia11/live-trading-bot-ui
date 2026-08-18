@@ -109,14 +109,14 @@ export default function Chart({ bars, fitKey, timeZone }: Props) {
     const fast = chart.addLineSeries({
       color: "#5b9dff",
       lineWidth: 2,
-      title: "Fast GMA",
+      title: "Fast GMA (EMA 3)",
       lastValueVisible: true,
       priceLineVisible: false,
     });
     const slow = chart.addLineSeries({
       color: "#ff9f43",
       lineWidth: 2,
-      title: "Slow GMA",
+      title: "Slow GMA (SMA 3)",
       lastValueVisible: true,
       priceLineVisible: false,
     });

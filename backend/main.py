@@ -24,7 +24,7 @@ from backend.gcs import (
     list_trade_symbols,
 )
 from backend.aggregate import PRESETS, parse_spec
-from backend.gma import detect_crosses, gaussian_ma
+from backend.gma import EMA_COL, SMA_COL, detect_crosses, dual_gma
 from backend.optimize import optimize as run_optimize
 
 store = OhlcvStore()
@@ -41,10 +41,10 @@ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 
 class GmaParams(BaseModel):
-    fast_length: int = Field(20, ge=2, le=500)
-    fast_sigma: float = Field(3.0, gt=0, le=50)
-    slow_length: int = Field(50, ge=2, le=500)
-    slow_sigma: float = Field(3.0, gt=0, le=50)
+    fast_length: int = Field(20, ge=5, le=100)
+    fast_sigma: float = Field(3.0, ge=1, le=10)
+    slow_length: int = Field(50, ge=5, le=100)
+    slow_sigma: float = Field(3.0, ge=1, le=10)
 
 
 def _finite(value: float) -> float | None:
@@ -85,8 +85,17 @@ def _chart_payload(symbol: str, timeframe: str, params: GmaParams, refresh: bool
         }
 
     close = frame["close"].to_numpy()
-    fast = gaussian_ma(close, params.fast_length, params.fast_sigma)
-    slow = gaussian_ma(close, params.slow_length, params.slow_sigma)
+    ema_source = frame[EMA_COL].to_numpy() if EMA_COL in frame.columns else None
+    sma_source = frame[SMA_COL].to_numpy() if SMA_COL in frame.columns else None
+    fast, slow = dual_gma(
+        close,
+        params.fast_length,
+        params.fast_sigma,
+        params.slow_length,
+        params.slow_sigma,
+        ema_source=ema_source,
+        sma_source=sma_source,
+    )
     buy, sell = detect_crosses(fast, slow)
 
     bars = []
@@ -199,10 +208,10 @@ def chart(
     symbol: str = Query(..., min_length=1),
     timeframe: str = Query(..., min_length=1),
     refresh: bool = False,
-    fast_length: int = Query(20, ge=2, le=500),
-    fast_sigma: float = Query(3.0, gt=0, le=50),
-    slow_length: int = Query(50, ge=2, le=500),
-    slow_sigma: float = Query(3.0, gt=0, le=50),
+    fast_length: int = Query(20, ge=5, le=100),
+    fast_sigma: float = Query(3.0, ge=1, le=10),
+    slow_length: int = Query(50, ge=5, le=100),
+    slow_sigma: float = Query(3.0, ge=1, le=10),
 ) -> dict:
     params = GmaParams(
         fast_length=fast_length,
@@ -217,10 +226,10 @@ def chart(
 def refresh(
     symbol: str = Query(..., min_length=1),
     timeframe: str = Query(..., min_length=1),
-    fast_length: int = Query(20, ge=2, le=500),
-    fast_sigma: float = Query(3.0, gt=0, le=50),
-    slow_length: int = Query(50, ge=2, le=500),
-    slow_sigma: float = Query(3.0, gt=0, le=50),
+    fast_length: int = Query(20, ge=5, le=100),
+    fast_sigma: float = Query(3.0, ge=1, le=10),
+    slow_length: int = Query(50, ge=5, le=100),
+    slow_sigma: float = Query(3.0, ge=1, le=10),
 ) -> dict:
     params = GmaParams(
         fast_length=fast_length,
@@ -247,7 +256,7 @@ async def optimize(
     queue: asyncio.Queue[dict] = asyncio.Queue()
     loop = asyncio.get_running_loop()
 
-    def load_close(spec: str):
+    def load_series(spec: str):
         try:
             entry = store.get(symbol, spec, refresh=refresh)
         except FileNotFoundError:
@@ -256,14 +265,25 @@ async def optimize(
             raise HTTPException(status_code=502, detail=f"Failed to read {spec}: {exc}") from exc
         if entry.frame.empty or "close" not in entry.frame.columns:
             return None
-        return entry.frame["close"].to_numpy(dtype=np.float64)
+        close = entry.frame["close"].to_numpy(dtype=np.float64)
+        ema_source = (
+            entry.frame[EMA_COL].to_numpy(dtype=np.float64)
+            if EMA_COL in entry.frame.columns
+            else None
+        )
+        sma_source = (
+            entry.frame[SMA_COL].to_numpy(dtype=np.float64)
+            if SMA_COL in entry.frame.columns
+            else None
+        )
+        return close, ema_source, sma_source
 
     def on_progress(event: dict) -> None:
         loop.call_soon_threadsafe(queue.put_nowait, event)
 
     def run() -> None:
         try:
-            result = run_optimize(symbol, metric, load_close, on_progress=on_progress)
+            result = run_optimize(symbol, metric, load_series, on_progress=on_progress)
             on_progress({"type": "done", "result": result})
         except LookupError as exc:
             on_progress({"type": "error", "detail": str(exc)})

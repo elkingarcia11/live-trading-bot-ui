@@ -173,6 +173,10 @@ input.spec {
   background: var(--slow);
 }
 
+.live-pill.paused .dot {
+  background: var(--slow);
+}
+
 .live-pill.stale .dot {
   background: var(--sell);
 }
@@ -215,6 +219,10 @@ input.spec {
   margin: 0 0 12px;
   color: var(--text);
   font-variant-numeric: tabular-nums;
+}
+
+.hint.warn {
+  color: var(--sell);
 }
 
 .sidebar label {
@@ -324,9 +332,30 @@ input[type="range"] {
   inset: 0;
 }
 
+select:disabled,
+input:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.chart-lock {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 11, 16, 0.55);
+  color: var(--muted);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 12px;
+  pointer-events: all;
+}
+
 .banner {
   position: absolute;
-  z-index: 2;
+  z-index: 4;
   top: 12px;
   left: 12px;
   right: 12px;

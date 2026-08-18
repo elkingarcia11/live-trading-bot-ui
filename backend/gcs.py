@@ -11,7 +11,7 @@ from functools import lru_cache
 from pathlib import Path
 from threading import Lock
 
-from backend.aggregate import aggregate_trades
+from backend.aggregate import aggregate_trades, attach_source_mas
 import pandas as pd
 import pyarrow.parquet as pq
 from google.cloud import storage
@@ -202,8 +202,11 @@ class OhlcvStore:
 
     def get(self, symbol: str, timeframe: str, refresh: bool = False) -> CacheEntry:
         if has_ohlcv(symbol, timeframe):
-            return self._get_ohlcv(symbol, timeframe, refresh)
-        return self._get_aggregated(symbol, timeframe, refresh)
+            entry = self._get_ohlcv(symbol, timeframe, refresh)
+        else:
+            entry = self._get_aggregated(symbol, timeframe, refresh)
+        attach_source_mas(entry.frame)
+        return entry
 
     def peek(self, symbol: str, timeframe: str) -> CacheEntry | None:
         with self._lock:
@@ -215,6 +218,7 @@ class OhlcvStore:
             cached = self._ohlcv.get(key)
         if refresh or cached is None:
             frame, fp, updated = load_ohlcv(symbol, timeframe)
+            frame = attach_source_mas(frame)
             resolved = _resolve_name(list_ohlcv_symbols(), symbol) or symbol
             entry = CacheEntry(
                 frame=frame,
