@@ -3,6 +3,8 @@ import Chart, { CHART_ZONES, formatChartTime, type ChartZone } from "./Chart";
 import { fetchCatalog, fetchChart, fetchMeta, watchUrl } from "./api";
 import { DEFAULT_PARAMS, type Bar, type GmaParams } from "./types";
 
+import { computeTradeStats, formatPct, formatWinRate } from "./tradeStats";
+
 const FALLBACK_AGGREGATES = ["50t", "100t", "200t", "500t", "1000t", "1m", "5m", "15m", "30m", "1h"];
 
 function formatPrice(value: number | null | undefined): string {
@@ -48,6 +50,7 @@ export default function App() {
   const buys = bars.filter((bar) => bar.signal === "buy").length;
   const sells = bars.filter((bar) => bar.signal === "sell").length;
   const lastSignal = [...bars].reverse().find((bar) => bar.signal) ?? null;
+  const tradeStats = useMemo(() => computeTradeStats(bars), [bars]);
 
   const loadCatalog = useCallback(async () => {
     const data = await fetchCatalog();
@@ -57,11 +60,14 @@ export default function App() {
     const nextSymbol =
       symbol && data.symbols[symbol] ? symbol : Object.keys(data.symbols).sort()[0] ?? "";
     const nextFrames = data.symbols[nextSymbol] ?? [];
-    const nextTf = nextFrames.includes(timeframe) ? timeframe : nextFrames[0] ?? "";
+    const keepTf = nextFrames.includes(timeframe);
     setSymbol(nextSymbol);
-    setTimeframe(nextTf);
-    if (!nextTf && data.has_trades?.[nextSymbol]) {
-      setAggregate((prev) => prev || "100t");
+    if (keepTf) {
+      setTimeframe(timeframe);
+    } else if (!aggregate) {
+      setTimeframe(nextFrames[0] ?? "");
+    } else {
+      setTimeframe("");
     }
   }, [symbol, timeframe]);
 
@@ -182,12 +188,13 @@ export default function App() {
           <select
             value={timeframe}
             onChange={(e) => {
-              setTimeframe(e.target.value);
-              setAggregate("");
+              const next = e.target.value;
+              setTimeframe(next);
+              if (next) setAggregate("");
             }}
             disabled={!timeframes.length}
           >
-            {timeframes.length === 0 && <option value="">No ohlcv</option>}
+            <option value="">Select timeframe</option>
             {timeframes.map((item) => (
               <option key={item} value={item}>
                 {item}
@@ -200,10 +207,14 @@ export default function App() {
           <span>Aggregate</span>
           <select
             value={aggregate}
-            onChange={(e) => setAggregate(e.target.value)}
+            onChange={(e) => {
+              const next = e.target.value;
+              setAggregate(next);
+              if (next) setTimeframe("");
+            }}
             disabled={!hasTrades[symbol]}
           >
-            <option value="">Use timeframe</option>
+            <option value="">Select aggregate</option>
             {aggregates.map((item) => (
               <option key={item} value={item}>
                 {item}
@@ -224,16 +235,6 @@ export default function App() {
             />
           </label>
         )}
-        <label className="field">
-          <span>Timezone</span>
-          <select value={chartZone} onChange={(e) => setChartZone(e.target.value as ChartZone)}>
-            {CHART_ZONES.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-        </label>
         <button
           className="refresh"
           type="button"
@@ -333,8 +334,8 @@ export default function App() {
           <h2>Legend</h2>
           <div><i className="swatch fast" /> Fast GMA</div>
           <div><i className="swatch slow" /> Slow GMA</div>
-          <div><i className="swatch buy" /> Fast crosses above slow</div>
-          <div><i className="swatch sell" /> Fast crosses below slow</div>
+          <div><i className="swatch buy" /> Call: buy → sell (up = win)</div>
+          <div><i className="swatch sell" /> Put: sell → buy (down = win)</div>
         </section>
         <section className="stats">
           <h2>Session</h2>
@@ -350,12 +351,40 @@ export default function App() {
             <div><dt>Buys</dt><dd className="buy">{buys}</dd></div>
             <div><dt>Sells</dt><dd className="sell">{sells}</dd></div>
             <div>
+              <dt>Win rate</dt>
+              <dd>{formatWinRate(tradeStats.winRate)}</dd>
+            </div>
+            <div>
+              <dt>Profit</dt>
+              <dd className={tradeStats.profitPct >= 0 ? "buy" : "sell"}>
+                {formatPct(tradeStats.profitPct)}
+              </dd>
+            </div>
+            {tradeStats.openPosition && tradeStats.unrealizedPct != null && (
+              <div>
+                <dt>Open {tradeStats.openSide === "long" ? "call" : "put"} P&amp;L</dt>
+                <dd className={tradeStats.unrealizedPct >= 0 ? "buy" : "sell"}>
+                  {formatPct(tradeStats.unrealizedPct)}
+                </dd>
+              </div>
+            )}
+            <div>
               <dt>Last signal</dt>
               <dd className={lastSignal?.signal ?? ""}>
                 {lastSignal?.signal ? lastSignal.signal.toUpperCase() : "—"}
               </dd>
             </div>
           </dl>
+        </section>
+        <section className="timezone">
+          <h2>Timezone</h2>
+          <select value={chartZone} onChange={(e) => setChartZone(e.target.value as ChartZone)}>
+            {CHART_ZONES.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.label}
+              </option>
+            ))}
+          </select>
         </section>
       </aside>
 

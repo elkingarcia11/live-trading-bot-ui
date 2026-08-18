@@ -161,10 +161,21 @@ input.spec {
 
 .sidebar {
   grid-area: side;
+  display: flex;
+  flex-direction: column;
   border-right: 1px solid var(--line);
   background: var(--panel-2);
   overflow: auto;
-  padding: 16px 14px 24px;
+  padding: 16px 14px 16px;
+}
+
+.sidebar .timezone {
+  margin-top: auto;
+}
+
+.sidebar .timezone select {
+  width: 100%;
+  min-width: 0;
 }
 
 .sidebar section + section {
