@@ -50,20 +50,20 @@ export interface GmaParams {
 }
 
 export type OptimizeMetric =
-  | "total_profit"
-  | "call_profit"
-  | "put_profit"
-  | "total_pct"
-  | "call_pct"
-  | "put_pct";
+  | "total_win_rate"
+  | "call_win_rate"
+  | "put_win_rate"
+  | "total_profit_pct"
+  | "call_profit_pct"
+  | "put_profit_pct";
 
 export const OPTIMIZE_OPTIONS: { id: OptimizeMetric; label: string }[] = [
-  { id: "total_profit", label: "Maximize total profit" },
-  { id: "call_profit", label: "Maximize call profit" },
-  { id: "put_profit", label: "Maximize put profit" },
-  { id: "total_pct", label: "Maximize total %" },
-  { id: "call_pct", label: "Maximize call %" },
-  { id: "put_pct", label: "Maximize put %" },
+  { id: "total_win_rate", label: "Maximize total win rate" },
+  { id: "call_win_rate", label: "Maximize call win rate" },
+  { id: "put_win_rate", label: "Maximize put win rate" },
+  { id: "total_profit_pct", label: "Maximize total profit %" },
+  { id: "call_profit_pct", label: "Maximize call profit %" },
+  { id: "put_profit_pct", label: "Maximize put profit %" },
 ];
 
 export interface OptimizeProgress {

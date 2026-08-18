@@ -146,9 +146,9 @@ export default function App() {
         const goal = OPTIMIZE_OPTIONS.find((item) => item.id === metric)?.label ?? metric;
         setOptimizeNote(
           `${goal} · ${result.timeframe} · ` +
-            `total ${formatPoints(result.profit)} / ${formatPct(result.profit_pct)} · ` +
-            `call ${formatPoints(result.call_profit)} / ${formatPct(result.call_profit_pct)} · ` +
-            `put ${formatPoints(result.put_profit)} / ${formatPct(result.put_profit_pct)}`
+            `total WR ${formatWinRateLine(result.win_rate, result.wins, result.closed_trades)} ${formatPct(result.profit_pct)} · ` +
+            `call WR ${formatWinRateLine(result.call_win_rate, result.call_wins, result.close_calls)} ${formatPct(result.call_profit_pct)} · ` +
+            `put WR ${formatWinRateLine(result.put_win_rate, result.put_wins, result.close_puts)} ${formatPct(result.put_profit_pct)}`
         );
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));

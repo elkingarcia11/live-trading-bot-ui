@@ -235,12 +235,12 @@ def refresh(
 async def optimize(
     symbol: str = Query(..., min_length=1),
     metric: Literal[
-        "total_profit",
-        "call_profit",
-        "put_profit",
-        "total_pct",
-        "call_pct",
-        "put_pct",
+        "total_win_rate",
+        "call_win_rate",
+        "put_win_rate",
+        "total_profit_pct",
+        "call_profit_pct",
+        "put_profit_pct",
     ] = Query(...),
     refresh: bool = False,
 ):

@@ -1,4 +1,4 @@
-"""Grid-search aggregates and GMA params for point profit or closed profit %."""
+"""Grid-search aggregates and GMA params for win rate or closed profit %."""
 
 from __future__ import annotations
 
@@ -46,12 +46,12 @@ class Trial:
 
 
 METRICS = {
-    "total_profit",
-    "call_profit",
-    "put_profit",
-    "total_pct",
-    "call_pct",
-    "put_pct",
+    "total_win_rate",
+    "call_win_rate",
+    "put_win_rate",
+    "total_profit_pct",
+    "call_profit_pct",
+    "put_profit_pct",
 }
 
 
@@ -151,17 +151,17 @@ def score_events(
 
 
 def _metric_value(trial: Trial, metric: str) -> tuple[float, float, int]:
-    if metric == "total_profit":
-        return trial.profit, trial.profit_pct, trial.closed
-    if metric == "call_profit":
-        return trial.call_profit, trial.call_profit_pct, trial.close_calls
-    if metric == "put_profit":
-        return trial.put_profit, trial.put_profit_pct, trial.close_puts
-    if metric == "total_pct":
-        return trial.profit_pct, trial.profit, trial.closed
-    if metric == "call_pct":
-        return trial.call_profit_pct, trial.call_profit, trial.close_calls
-    return trial.put_profit_pct, trial.put_profit, trial.close_puts
+    if metric == "total_win_rate":
+        return trial.win_rate, trial.profit_pct, trial.closed
+    if metric == "call_win_rate":
+        return trial.call_win_rate, trial.call_profit_pct, trial.close_calls
+    if metric == "put_win_rate":
+        return trial.put_win_rate, trial.put_profit_pct, trial.close_puts
+    if metric == "total_profit_pct":
+        return trial.profit_pct, trial.win_rate, trial.closed
+    if metric == "call_profit_pct":
+        return trial.call_profit_pct, trial.call_win_rate, trial.close_calls
+    return trial.put_profit_pct, trial.put_win_rate, trial.close_puts
 
 
 def _enough_trades(metric: str, close_calls: int, close_puts: int, closed: int) -> bool:
