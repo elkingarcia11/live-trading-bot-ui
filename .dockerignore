@@ -1,0 +1,13 @@
+.venv/
+.git/
+.gitignore
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+gcs-sa.json
+__pycache__/
+*.pyc
+.DS_Store
+*.parquet
+gmaxo.rtf
+agent-transcripts/

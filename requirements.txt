@@ -1,0 +1,7 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.32
+google-cloud-storage>=2.18
+pandas>=2.2
+pyarrow>=17
+numpy>=2.0
+pydantic>=2.10
