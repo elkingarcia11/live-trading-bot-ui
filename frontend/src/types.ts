@@ -72,7 +72,9 @@ export type OptimizeMetric =
   | "put_win_rate"
   | "total_profit_pct"
   | "call_profit_pct"
-  | "put_profit_pct";
+  | "put_profit_pct"
+  | "max_runup_pct"
+  | "avg_max_runup_pct";
 
 export const OPTIMIZE_OPTIONS: { id: OptimizeMetric; label: string }[] = [
   { id: "total_win_rate", label: "Maximize total win rate" },
@@ -81,6 +83,8 @@ export const OPTIMIZE_OPTIONS: { id: OptimizeMetric; label: string }[] = [
   { id: "total_profit_pct", label: "Maximize total profit %" },
   { id: "call_profit_pct", label: "Maximize long profit %" },
   { id: "put_profit_pct", label: "Maximize short profit %" },
+  { id: "max_runup_pct", label: "Maximize max run-up %" },
+  { id: "avg_max_runup_pct", label: "Maximize average max run-up %" },
 ];
 
 export interface OptimizeProgress {
@@ -150,7 +154,7 @@ export const VIZ_METRIC_OPTIONS: { id: VizMetric; label: string }[] = [
   { id: "closed", label: "Closed trades" },
 ];
 
-export const SEARCH_METRIC_FIELD: Record<OptimizeMetric, VizMetric> = {
+export const SEARCH_METRIC_FIELD: Partial<Record<OptimizeMetric, VizMetric>> = {
   total_win_rate: "win_rate",
   call_win_rate: "call_win_rate",
   put_win_rate: "put_win_rate",
@@ -241,6 +245,7 @@ export interface OptimizeResult {
   tested: number;
   max_drawdown_pct?: number;
   max_runup_pct?: number;
+  avg_max_runup_pct?: number;
   average_profit_pct?: number;
   error?: string;
   viz?: OptimizeViz | null;

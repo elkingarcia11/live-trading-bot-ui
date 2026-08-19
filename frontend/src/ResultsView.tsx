@@ -161,14 +161,14 @@ export default function ResultsView({
   const symbols = Object.keys(catalog.symbols);
   const metrics = symbol ? Object.keys(catalog.symbols[symbol] ?? {}) : [];
   const frames = symbol && metric ? catalog.symbols[symbol]?.[metric] ?? [] : [];
-  const defaultMetric = (viz ? SEARCH_METRIC_FIELD[viz.metric] : "win_rate") as VizMetric;
+  const defaultMetric = (viz ? SEARCH_METRIC_FIELD[viz.metric] ?? "win_rate" : "win_rate") as VizMetric;
   const [colorMetric, setColorMetric] = useState<VizMetric>(defaultMetric);
   const [agg, setAgg] = useState<VizAgg>("best");
   const [xParam, setXParam] = useState<VizParam>("fast_length");
   const [yParam, setYParam] = useState<VizParam>("slow_length");
 
   useEffect(() => {
-    if (viz) setColorMetric(SEARCH_METRIC_FIELD[viz.metric]);
+    if (viz) setColorMetric(SEARCH_METRIC_FIELD[viz.metric] ?? "win_rate");
   }, [viz]);
 
   const heatmap = useMemo(() => {

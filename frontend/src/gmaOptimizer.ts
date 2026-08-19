@@ -98,15 +98,18 @@ function tradeIndices(fast, slow, masks) {
   return { buy, sell, flatten };
 }
 
-function score(close, events) {
+function score(close, high, low, events) {
   let bi = 0, si = 0, fi = 0, side = 0, entry = 0;
   let closed = 0, wins = 0, longClosed = 0, shortClosed = 0, longWins = 0, shortWins = 0;
   let profit = 0, longProfit = 0, shortProfit = 0, profitPct = 0, longProfitPct = 0, shortProfitPct = 0;
+  let tradeRunup = 0, maxRunup = 0, totalRunup = 0;
   const closeTrade = (price) => {
     if (!side) return;
     const pnl = side === 1 ? price - entry : entry - price;
     const pct = entry === 0 ? 0 : pnl / entry * 100;
     closed++; wins += pnl > 0 ? 1 : 0; profit += pnl; profitPct += pct;
+    if (tradeRunup > maxRunup) maxRunup = tradeRunup;
+    totalRunup += tradeRunup;
     if (side === 1) {
       longClosed++; longWins += pnl > 0 ? 1 : 0; longProfit += pnl; longProfitPct += pct;
     } else {
@@ -120,19 +123,24 @@ function score(close, events) {
     const f = fi < events.flatten.length ? events.flatten[fi] : Infinity;
     const index = Math.min(b, s, f);
     const price = close[index];
+    if (side === 1) {
+      tradeRunup = Math.max(tradeRunup, (high[index] - entry) / entry * 100);
+    } else if (side === -1) {
+      tradeRunup = Math.max(tradeRunup, (entry - low[index]) / entry * 100);
+    }
     if (f === index) {
       fi++; if (b === index) bi++; if (s === index) si++; closeTrade(price);
     } else if (b === index) {
-      bi++; if (side === -1) closeTrade(price); if (!side) { entry = price; side = 1; }
+      bi++; if (side === -1) closeTrade(price); if (!side) { entry = price; side = 1; tradeRunup = Math.max(0, (high[index] - price) / price * 100); }
     } else {
-      si++; if (side === 1) closeTrade(price); if (!side) { entry = price; side = -1; }
+      si++; if (side === 1) closeTrade(price); if (!side) { entry = price; side = -1; tradeRunup = Math.max(0, (price - low[index]) / price * 100); }
     }
   }
-  return { closed, wins, longClosed, shortClosed, longWins, shortWins, profit, longProfit, shortProfit, profitPct, longProfitPct, shortProfitPct };
+  return { closed, wins, longClosed, shortClosed, longWins, shortWins, profit, longProfit, shortProfit, profitPct, longProfitPct, shortProfitPct, maxRunup, avgMaxRunup: closed ? totalRunup / closed : 0 };
 }
 
 self.onmessage = (event) => {
-  const { close, times, symbol, timeframe, metric } = event.data;
+  const { close, high, low, times, symbol, timeframe, metric } = event.data;
   const ema = sourceEma(close, 3);
   const sma = sourceSma(close, 3);
   const masks = sessionMasks(times);
@@ -145,12 +153,14 @@ self.onmessage = (event) => {
   let best = null;
   for (let i = 0; i < pairs.length; i++) {
     const [fastIndex, slowIndex] = pairs[i];
-    const stats = score(close, tradeIndices(fastGrid[fastIndex], slowGrid[slowIndex], masks));
+    const stats = score(close, high, low, tradeIndices(fastGrid[fastIndex], slowGrid[slowIndex], masks));
     const value = metric === "total_win_rate" ? (stats.closed ? stats.wins / stats.closed * 100 : 0)
       : metric === "call_win_rate" ? (stats.longClosed ? stats.longWins / stats.longClosed * 100 : 0)
       : metric === "put_win_rate" ? (stats.shortClosed ? stats.shortWins / stats.shortClosed * 100 : 0)
       : metric === "total_profit_pct" ? stats.profitPct
-      : metric === "call_profit_pct" ? stats.longProfitPct : stats.shortProfitPct;
+      : metric === "call_profit_pct" ? stats.longProfitPct
+      : metric === "put_profit_pct" ? stats.shortProfitPct
+      : metric === "max_runup_pct" ? stats.maxRunup : stats.avgMaxRunup;
     if (stats.closed >= MIN_TRADES && (!best || value > best.value)) best = { value, fastIndex, slowIndex, stats };
     if (i % 250 === 0 || i === pairs.length - 1) self.postMessage({ type: "progress", pct: 5 + i / pairs.length * 95, frame: i, frames: pairs.length, tested: i + 1, total: pairs.length, timeframe, message: "Testing GMA parameter pairs" });
   }
@@ -165,7 +175,8 @@ self.onmessage = (event) => {
     profit: s.profit, call_profit: s.longProfit, put_profit: s.shortProfit,
     profit_pct: s.profitPct, call_profit_pct: s.longProfitPct, put_profit_pct: s.shortProfitPct,
     closed_trades: s.closed, close_calls: s.longClosed, close_puts: s.shortClosed,
-    wins: s.wins, call_wins: s.longWins, put_wins: s.shortWins, bars: close.length, tested: pairs.length
+    wins: s.wins, call_wins: s.longWins, put_wins: s.shortWins, bars: close.length, tested: pairs.length,
+    max_runup_pct: s.maxRunup, avg_max_runup_pct: s.avgMaxRunup
   }});
 };
 `;
@@ -199,6 +210,8 @@ export function runFrontendOptimization(
     );
     const worker = new Worker(url);
     const close = new Float64Array(bars.map((bar) => bar.close));
+    const high = new Float64Array(bars.map((bar) => bar.high));
+    const low = new Float64Array(bars.map((bar) => bar.low));
     const times = bars.map((bar) => bar.time);
     const cleanup = () => {
       worker.terminate();
@@ -220,8 +233,10 @@ export function runFrontendOptimization(
       cleanup();
       reject(new Error(event.message || "Frontend optimization failed"));
     };
-    worker.postMessage({ close, times, symbol, timeframe, metric }, [
+    worker.postMessage({ close, high, low, times, symbol, timeframe, metric }, [
       close.buffer,
+      high.buffer,
+      low.buffer,
     ]);
   });
 }

@@ -24,6 +24,8 @@ function optimizationScore(result: OptimizeResult, metric: OptimizeMetric): stri
     total_profit_pct: result.profit_pct,
     call_profit_pct: result.call_profit_pct,
     put_profit_pct: result.put_profit_pct,
+    max_runup_pct: result.max_runup_pct,
+    avg_max_runup_pct: result.avg_max_runup_pct,
   }[metric];
   return value == null ? "—" : `${value.toFixed(metric.includes("win_rate") ? 1 : 2)}%`;
 }
