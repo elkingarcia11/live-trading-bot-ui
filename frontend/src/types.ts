@@ -76,11 +76,11 @@ export type OptimizeMetric =
 
 export const OPTIMIZE_OPTIONS: { id: OptimizeMetric; label: string }[] = [
   { id: "total_win_rate", label: "Maximize total win rate" },
-  { id: "call_win_rate", label: "Maximize call win rate" },
-  { id: "put_win_rate", label: "Maximize put win rate" },
+  { id: "call_win_rate", label: "Maximize long win rate" },
+  { id: "put_win_rate", label: "Maximize short win rate" },
   { id: "total_profit_pct", label: "Maximize total profit %" },
-  { id: "call_profit_pct", label: "Maximize call profit %" },
-  { id: "put_profit_pct", label: "Maximize put profit %" },
+  { id: "call_profit_pct", label: "Maximize long profit %" },
+  { id: "put_profit_pct", label: "Maximize short profit %" },
 ];
 
 export interface OptimizeProgress {

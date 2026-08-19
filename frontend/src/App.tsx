@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Chart, { CHART_ZONES, formatChartTime, type ChartZone } from "./Chart";
 import { fetchCatalog, fetchMeta, streamChart, watchUrl } from "./api";
-import { DEFAULT_PARAMS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_SIGMA_MAX, GMA_SIGMA_MIN, gmaScale, isValidGmaPair, type Bar, type GmaParams, type LoadProgress } from "./types";
+import { runFrontendOptimization } from "./gmaOptimizer";
+import { DEFAULT_PARAMS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_SIGMA_MAX, GMA_SIGMA_MIN, gmaScale, isValidGmaPair, OPTIMIZE_OPTIONS, type Bar, type GmaParams, type LoadProgress, type OptimizeMetric, type OptimizeProgress, type OptimizeResult } from "./types";
 
 import { computeTradeStats, formatActions, formatPct, formatPoints, formatWinRateLine, isUpAction, withActions } from "./tradeStats";
 
@@ -13,6 +14,18 @@ function formatPrice(value: number | null | undefined): string {
 function formatClock(iso: string | null, zone: ChartZone): string {
   if (!iso) return "—";
   return formatChartTime(Math.floor(new Date(iso).getTime() / 1000), zone, true);
+}
+
+function optimizationScore(result: OptimizeResult, metric: OptimizeMetric): string {
+  const value = {
+    total_win_rate: result.win_rate,
+    call_win_rate: result.call_win_rate,
+    put_win_rate: result.put_win_rate,
+    total_profit_pct: result.profit_pct,
+    call_profit_pct: result.call_profit_pct,
+    put_profit_pct: result.put_profit_pct,
+  }[metric];
+  return value == null ? "—" : `${value.toFixed(metric.includes("win_rate") ? 1 : 2)}%`;
 }
 
 export default function App() {
@@ -32,6 +45,10 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [applyingGma, setApplyingGma] = useState(false);
   const [chartProgress, setChartProgress] = useState<LoadProgress | null>(null);
+  const [optimizationFeature, setOptimizationFeature] = useState<OptimizeMetric>("total_profit_pct");
+  const [optimizationProgress, setOptimizationProgress] = useState<OptimizeProgress | null>(null);
+  const [optimizationResult, setOptimizationResult] = useState<OptimizeResult | null>(null);
+  const [optimizing, setOptimizing] = useState(false);
   const [gmaApplied, setGmaApplied] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const fingerprintRef = useRef("");
@@ -180,6 +197,8 @@ export default function App() {
     setDraft(DEFAULT_PARAMS);
     setParams(DEFAULT_PARAMS);
     setGmaApplied(false);
+    setOptimizationProgress(null);
+    setOptimizationResult(null);
   };
 
   const applyGma = () => {
@@ -189,6 +208,44 @@ export default function App() {
       setParams(draft);
       setGmaApplied(true);
     }
+  };
+
+  const optimizeGmas = async () => {
+    if (locked || !symbol || !effectiveTf || busy || optimizing) return;
+    setOptimizing(true);
+    setOptimizationProgress(null);
+    setOptimizationResult(null);
+    setError(null);
+    try {
+      const result = await runFrontendOptimization(
+        bars,
+        symbol,
+        effectiveTf,
+        optimizationFeature,
+        (progress) => setOptimizationProgress(progress),
+      );
+      setOptimizationResult(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setOptimizing(false);
+      setOptimizationProgress(null);
+    }
+  };
+
+  const applyOptimizedGmas = () => {
+    if (!optimizationResult) return;
+    const best: GmaParams = {
+      fastLength: optimizationResult.params.fast_length,
+      fastSigma: optimizationResult.params.fast_sigma,
+      slowLength: optimizationResult.params.slow_length,
+      slowSigma: optimizationResult.params.slow_sigma,
+    };
+    setDraft(best);
+    setParams(best);
+    setGmaApplied(true);
+    setApplyingGma(true);
+    setStatus("loading");
   };
 
   return (
@@ -365,7 +422,7 @@ export default function App() {
           <button
             type="button"
             className="optimize apply-gma"
-            disabled={locked || !gmaPairOk || !symbol || !effectiveTf || busy}
+            disabled={locked || !gmaPairOk || !symbol || !effectiveTf || busy || optimizing}
             onClick={applyGma}
           >
             {applyingGma
@@ -374,6 +431,61 @@ export default function App() {
                 : "Applying GMAs…"
               : "Apply GMAs"}
           </button>
+        </section>
+        <section className="gma-optimizer">
+          <h2>Optimize GMAs</h2>
+          <label>
+            Feature
+            <select
+              value={optimizationFeature}
+              disabled={locked || busy || optimizing || !symbol || !effectiveTf}
+              onChange={(event) => {
+                setOptimizationFeature(event.target.value as OptimizeMetric);
+                setOptimizationResult(null);
+              }}
+            >
+              {OPTIMIZE_OPTIONS.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label.replace("Maximize ", "")}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            className="optimize"
+            disabled={locked || busy || optimizing || !symbol || !effectiveTf}
+            onClick={optimizeGmas}
+          >
+            {optimizing
+              ? optimizationProgress
+                ? `Optimizing ${Math.round(optimizationProgress.pct)}%`
+                : "Starting optimization…"
+              : "Optimize GMAs"}
+          </button>
+          {optimizationProgress && (
+            <p className="hint optimizer-status">
+              {optimizationProgress.message}
+            </p>
+          )}
+          {optimizationResult && (
+            <div className="optimizer-result">
+              <p className="hint">
+                Best {optimizationFeature.replaceAll("_", " ")}: {optimizationScore(optimizationResult, optimizationFeature)}
+              </p>
+              <p className="optimizer-params">
+                F {optimizationResult.params.fast_length}/{optimizationResult.params.fast_sigma.toFixed(1)} · S {optimizationResult.params.slow_length}/{optimizationResult.params.slow_sigma.toFixed(1)}
+              </p>
+              <button
+                type="button"
+                className="optimize apply-gma"
+                disabled={busy || optimizing}
+                onClick={applyOptimizedGmas}
+              >
+                Apply Best GMAs
+              </button>
+            </div>
+          )}
         </section>
         <section className="stats">
           <h2>Session</h2>

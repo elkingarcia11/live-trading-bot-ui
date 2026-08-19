@@ -213,6 +213,42 @@ select {
   width: 100%;
 }
 
+.optimizer-status {
+  margin-top: 10px;
+  line-height: 1.35;
+}
+
+.gma-optimizer > label {
+  margin-top: 0;
+}
+
+.gma-optimizer select,
+.gma-optimizer > .optimize {
+  width: 100%;
+  min-width: 0;
+}
+
+.gma-optimizer > .optimize {
+  margin-top: 12px;
+}
+
+.optimizer-result {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.optimizer-result .hint {
+  margin-bottom: 4px;
+}
+
+.optimizer-params {
+  margin: 0;
+  color: var(--accent);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .sidebar .timezone select {
   width: 100%;
   min-width: 0;
