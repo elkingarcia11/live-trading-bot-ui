@@ -26,11 +26,19 @@ function etClock(unix: number): { date: string; minutes: number } {
   };
 }
 
-function sessionFlags(bars: Bar[]): { rth: boolean[]; open: boolean[]; close: boolean[] } {
+function sessionFlags(bars: Bar[]): {
+  rth: boolean[];
+  open: boolean[];
+  close: boolean[];
+} {
   const clocks = bars.map((bar) => etClock(bar.time));
-  const rth = clocks.map((clock) => clock.minutes >= RTH_START_MIN && clock.minutes < RTH_END_MIN);
+  const rth = clocks.map(
+    (clock) => clock.minutes >= RTH_START_MIN && clock.minutes < RTH_END_MIN,
+  );
   const open = rth.map(
-    (inRth, i) => inRth && (i === 0 || !rth[i - 1] || clocks[i].date !== clocks[i - 1].date)
+    (inRth, i) =>
+      inRth &&
+      (i === 0 || !rth[i - 1] || clocks[i].date !== clocks[i - 1].date),
   );
   const close = rth.map((inRth, i) => {
     if (!inRth || i === bars.length - 1) return false;
@@ -83,27 +91,17 @@ export interface TradeStats {
   lastActions: Action[];
 }
 
-/** Call: buy is cost, sell is revenue. Profit = sell − buy. */
-function callPnl(buyPrice: number, sellPrice: number): number {
-  return sellPrice - buyPrice;
+function optionPrice(bar: Bar, side: PositionSide): number | null {
+  return side === "long" ? bar.call_mark_price : bar.put_mark_price;
 }
 
-/**
- * Put: sell first (cost/notional), buy to cover.
- * Profit = (buy − sell) × −1, so price down is a win.
- */
-function putPnl(sellPrice: number, buyPrice: number): number {
-  return (buyPrice - sellPrice) * -1;
+function optionPnl(entryPrice: number, exitPrice: number): number {
+  return exitPrice - entryPrice;
 }
 
-function callPct(buyPrice: number, sellPrice: number): number {
-  if (buyPrice === 0) return 0;
-  return (callPnl(buyPrice, sellPrice) / buyPrice) * 100;
-}
-
-function putPct(sellPrice: number, buyPrice: number): number {
-  if (sellPrice === 0) return 0;
-  return (putPnl(sellPrice, buyPrice) / sellPrice) * 100;
+function optionPct(entryPrice: number, price: number): number {
+  if (entryPrice === 0) return 0;
+  return (optionPnl(entryPrice, price) / entryPrice) * 100;
 }
 
 /** Map GMA buy/sell crosses onto open/close call/put actions during RTH only. */
@@ -200,67 +198,108 @@ export function computeTradeStats(bars: Bar[]): TradeStats {
   let openPuts = 0;
   let closePuts = 0;
   let lastActions: Action[] = [];
-  let peakPct = 0;
-  let troughPct = 0;
   let maxDrawdownPct = 0;
   let maxRunupPct = 0;
+  let tradeLow: number | null = null;
+  let tradeHigh: number | null = null;
 
   for (const bar of labeled) {
     if (bar.actions?.length) lastActions = bar.actions;
     for (const action of bar.actions ?? []) {
       if (action === "close_put" && entry != null) {
-        const pnl = putPnl(entry, bar.close);
+        const exitPrice = optionPrice(bar, "short");
+        if (exitPrice == null) continue;
+        const pnl = optionPnl(entry, exitPrice);
         putProfit += pnl;
-        putProfitPct += putPct(entry, bar.close);
+        putProfitPct += optionPct(entry, exitPrice);
         closed += 1;
         closePuts += 1;
         if (pnl > 0) {
           wins += 1;
           putWins += 1;
         }
+        if (entry !== 0) {
+          const low =
+            tradeLow == null ? exitPrice : Math.min(tradeLow, exitPrice);
+          const high =
+            tradeHigh == null ? exitPrice : Math.max(tradeHigh, exitPrice);
+          maxDrawdownPct = Math.min(
+            maxDrawdownPct,
+            ((low - entry) / entry) * 100,
+          );
+          maxRunupPct = Math.max(maxRunupPct, ((high - entry) / entry) * 100);
+        }
         entry = null;
         side = null;
+        tradeLow = null;
+        tradeHigh = null;
       } else if (action === "close_call" && entry != null) {
-        const pnl = callPnl(entry, bar.close);
+        const exitPrice = optionPrice(bar, "long");
+        if (exitPrice == null) continue;
+        const pnl = optionPnl(entry, exitPrice);
         callProfit += pnl;
-        callProfitPct += callPct(entry, bar.close);
+        callProfitPct += optionPct(entry, exitPrice);
         closed += 1;
         closeCalls += 1;
         if (pnl > 0) {
           wins += 1;
           callWins += 1;
         }
+        if (entry !== 0) {
+          const low =
+            tradeLow == null ? exitPrice : Math.min(tradeLow, exitPrice);
+          const high =
+            tradeHigh == null ? exitPrice : Math.max(tradeHigh, exitPrice);
+          maxDrawdownPct = Math.min(
+            maxDrawdownPct,
+            ((low - entry) / entry) * 100,
+          );
+          maxRunupPct = Math.max(maxRunupPct, ((high - entry) / entry) * 100);
+        }
         entry = null;
         side = null;
+        tradeLow = null;
+        tradeHigh = null;
       } else if (action === "open_call") {
-        entry = bar.close;
-        side = "long";
-        openCalls += 1;
+        const entryPrice = optionPrice(bar, "long");
+        if (entryPrice != null) {
+          entry = entryPrice;
+          side = "long";
+          tradeLow = entryPrice;
+          tradeHigh = entryPrice;
+          openCalls += 1;
+        }
       } else if (action === "open_put") {
-        entry = bar.close;
-        side = "short";
-        openPuts += 1;
+        const entryPrice = optionPrice(bar, "short");
+        if (entryPrice != null) {
+          entry = entryPrice;
+          side = "short";
+          tradeLow = entryPrice;
+          tradeHigh = entryPrice;
+          openPuts += 1;
+        }
       }
     }
 
-    let equityPct = callProfitPct + putProfitPct;
     if (entry != null && side != null) {
-      equityPct += side === "long" ? callPct(entry, bar.close) : putPct(entry, bar.close);
+      const markPrice = optionPrice(bar, side);
+      if (markPrice != null) {
+        tradeLow = tradeLow == null ? markPrice : Math.min(tradeLow, markPrice);
+        tradeHigh =
+          tradeHigh == null ? markPrice : Math.max(tradeHigh, markPrice);
+      }
     }
-    if (equityPct > peakPct) peakPct = equityPct;
-    if (equityPct < troughPct) troughPct = equityPct;
-    const drawdownPct = equityPct - peakPct;
-    const runupPct = equityPct - troughPct;
-    if (drawdownPct < maxDrawdownPct) maxDrawdownPct = drawdownPct;
-    if (runupPct > maxRunupPct) maxRunupPct = runupPct;
   }
 
   const last = labeled.at(-1)!;
   let unrealized: number | null = null;
   let unrealizedPct: number | null = null;
   if (entry != null && side != null) {
-    unrealized = side === "long" ? callPnl(entry, last.close) : putPnl(entry, last.close);
-    unrealizedPct = side === "long" ? callPct(entry, last.close) : putPct(entry, last.close);
+    const markPrice = optionPrice(last, side);
+    if (markPrice != null) {
+      unrealized = optionPnl(entry, markPrice);
+      unrealizedPct = optionPct(entry, markPrice);
+    }
   }
 
   const profit = callProfit + putProfit;
@@ -313,7 +352,7 @@ export function formatWinRate(value: number | null): string {
 export function formatWinRateLine(
   value: number | null,
   wins: number,
-  closed: number
+  closed: number,
 ): string {
   if (closed <= 0) return "—";
   return `${formatWinRate(value)} (${wins}/${closed})`;

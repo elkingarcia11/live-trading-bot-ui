@@ -1,6 +1,17 @@
-import type { CatalogResponse, ChartResponse, GmaParams, LoadProgress, OptimizeMetric, OptimizeProgress } from "./types";
+import type {
+  CatalogResponse,
+  ChartResponse,
+  GmaParams,
+  LoadProgress,
+  OptimizeMetric,
+  OptimizeProgress,
+  OptimizeResult,
+  OptimizeViz,
+  ResultSummary,
+  ResultsCatalog,
+} from "./types";
 
-type DataSource = "ohlcv" | "trades";
+type DataSource = "ohlcv" | "trades" | "continuous";
 
 function query(params: GmaParams): string {
   const q = new URLSearchParams({
@@ -36,15 +47,19 @@ type StreamEvent<T, P extends { type: "progress" } = { type: "progress" }> =
   | { type: "done"; result: T }
   | { type: "error"; detail: string };
 
-function parseSseEvent<T, P extends { type: "progress" }>(chunk: string): StreamEvent<T, P> | null {
-  const dataLine = chunk.split(/\r?\n/).find((line) => line.startsWith("data:"));
+function parseSseEvent<T, P extends { type: "progress" }>(
+  chunk: string,
+): StreamEvent<T, P> | null {
+  const dataLine = chunk
+    .split(/\r?\n/)
+    .find((line) => line.startsWith("data:"));
   if (!dataLine) return null;
   return JSON.parse(dataLine.replace(/^data:\s?/, "")) as StreamEvent<T, P>;
 }
 
 async function streamEvents<T, P extends { type: "progress" }>(
   url: string,
-  onProgress: (progress: P) => void
+  onProgress: (progress: P) => void,
 ): Promise<T> {
   const response = await fetch(url, {
     cache: "no-store",
@@ -112,7 +127,7 @@ export function streamChart(
   params: GmaParams,
   refresh: boolean,
   onProgress: (progress: LoadProgress) => void,
-  source: DataSource
+  source: DataSource,
 ): Promise<ChartResponse> {
   const q = new URLSearchParams({
     symbol,
@@ -122,58 +137,65 @@ export function streamChart(
   });
   return streamEvents<ChartResponse, LoadProgress>(
     `/api/chart?${q.toString()}&${query(params)}`,
-    onProgress
+    onProgress,
   );
 }
 
-export function fetchMeta(symbol: string, timeframe: string, source: DataSource) {
+export function fetchMeta(
+  symbol: string,
+  timeframe: string,
+  source: DataSource,
+) {
   const q = new URLSearchParams({ symbol, timeframe, source });
   return fetch(`/api/meta?${q.toString()}`).then((r) =>
-    readJson<{ fingerprint: string; stale: boolean }>(r)
+    readJson<{ fingerprint: string; stale: boolean }>(r),
   );
 }
-
-type OptimizeResult = {
-  symbol: string;
-  metric: OptimizeMetric;
-  timeframe: string;
-  params: {
-    fast_length: number;
-    fast_sigma: number;
-    slow_length: number;
-    slow_sigma: number;
-  };
-  win_rate: number;
-  call_win_rate: number | null;
-  put_win_rate: number | null;
-  profit: number;
-  call_profit: number;
-  put_profit: number;
-  profit_pct: number;
-  closed_trades: number;
-  close_calls: number;
-  close_puts: number;
-  call_profit_pct: number;
-  put_profit_pct: number;
-  wins: number;
-  call_wins: number;
-  put_wins: number;
-  bars: number;
-  tested: number;
-};
 
 export async function streamOptimize(
   symbol: string,
   timeframe: string,
   metric: OptimizeMetric,
   onProgress: (progress: OptimizeProgress) => void,
-  source: DataSource
+  source: DataSource,
 ) {
   const q = new URLSearchParams({ symbol, timeframe, metric, source });
-  return streamEvents<OptimizeResult, OptimizeProgress>(`/api/optimize?${q.toString()}`, onProgress);
+  return streamEvents<OptimizeResult, OptimizeProgress>(
+    `/api/optimize?${q.toString()}`,
+    onProgress,
+  );
 }
 
-export function watchUrl(symbol: string, timeframe: string, source: DataSource): string {
+export function watchUrl(
+  symbol: string,
+  timeframe: string,
+  source: DataSource,
+): string {
   const q = new URLSearchParams({ symbol, timeframe, source });
   return `/api/events?${q.toString()}`;
+}
+
+export function fetchResultsCatalog(): Promise<ResultsCatalog> {
+  return fetch("/api/results").then((r) => readJson<ResultsCatalog>(r));
+}
+
+export function fetchResultSummary(
+  symbol: string,
+  metric: string,
+): Promise<ResultSummary> {
+  const q = new URLSearchParams({ symbol, metric });
+  return fetch(`/api/results/summary?${q.toString()}`).then((r) =>
+    readJson<ResultSummary>(r),
+  );
+}
+
+export function fetchResultDetail(
+  symbol: string,
+  metric: string,
+  timeframe: string,
+): Promise<{ result: OptimizeResult; viz: OptimizeViz | null }> {
+  const q = new URLSearchParams({ symbol, metric, timeframe });
+  return fetch(`/api/results/detail?${q.toString()}`).then((r) =>
+    readJson<{ result: OptimizeResult; viz: OptimizeViz | null }>(r),
+  );
 }

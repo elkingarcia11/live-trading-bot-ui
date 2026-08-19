@@ -21,14 +21,16 @@ from backend.gcs import (
     has_ohlcv,
     list_symbols,
     list_timeframes,
+    list_continuous_timeframes,
     list_trade_symbols,
 )
 from backend.aggregate import PRESETS, parse_spec
 from backend.gma import EMA_COL, SMA_COL, dual_gma
 from backend.optimize import optimize as run_optimize
 from backend.session import rth_trade_indices, session_masks
+from backend.viz import list_results, load_result, load_summary, save_optimize_result, split_viz
 
-DataSource = Literal["ohlcv", "trades"]
+DataSource = Literal["ohlcv", "trades", "continuous"]
 
 store = OhlcvStore()
 app = FastAPI(title="Live Trading Bot UI", version="1.0.0")
@@ -56,12 +58,26 @@ def _finite(value: float) -> float | None:
     return float(value)
 
 
+def _marks_after(candle_timestamps, marks) -> np.ndarray:
+    values = np.full(len(candle_timestamps), np.nan)
+    if marks.empty:
+        return values
+    candle_ns = candle_timestamps.astype("int64").to_numpy()
+    mark_ns = marks["timestamp"].astype("int64").to_numpy()
+    indices = np.searchsorted(mark_ns, candle_ns, side="left")
+    valid = indices < len(marks)
+    if valid.any():
+        values[valid] = marks["mark_price"].to_numpy()[indices[valid]]
+    return values
+
+
 def _json_default(value):
     if isinstance(value, (np.floating, np.integer)):
         return value.item()
     if isinstance(value, np.ndarray):
         return value.tolist()
-    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+    raise TypeError(
+        f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def _chart_payload(
@@ -74,27 +90,34 @@ def _chart_payload(
 ) -> dict:
     clock = ProgressClock(on_progress=on_progress, timeframe=timeframe)
     clock.emit(0, f"Loading {symbol}/{timeframe}", stage="start")
-    if source == "trades" or not has_ohlcv(symbol, timeframe):
+    if source == "trades" or (source != "continuous" and not has_ohlcv(symbol, timeframe)):
         try:
             parse_spec(timeframe)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
-        entry = store.get(symbol, timeframe, refresh=refresh, progress=clock, source=source)
+        entry = store.get(symbol, timeframe, refresh=refresh,
+                          progress=clock, source=source)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to read GCS: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"Failed to read GCS: {exc}") from exc
 
     clock.source = entry.source
     frame = entry.frame
+    call_marks, put_marks, mark_fingerprint = store.get_mark_prices(
+        refresh=refresh)
+    call_prices = _marks_after(frame["timestamp"], call_marks)
+    put_prices = _marks_after(frame["timestamp"], put_marks)
+    response_fingerprint = f"{entry.fingerprint}|{mark_fingerprint}"
     if frame.empty:
         return {
             "symbol": symbol,
             "timeframe": timeframe,
-            "fingerprint": entry.fingerprint,
+            "fingerprint": response_fingerprint,
             "updated": entry.updated.isoformat() if entry.updated else None,
             "loaded_at": entry.loaded_at.isoformat(),
             "bar_count": 0,
@@ -107,8 +130,10 @@ def _chart_payload(
 
     clock.emit(82, "Computing GMA", stage="gma")
     close = frame["close"].to_numpy()
-    ema_source = frame[EMA_COL].to_numpy() if EMA_COL in frame.columns else None
-    sma_source = frame[SMA_COL].to_numpy() if SMA_COL in frame.columns else None
+    ema_source = frame[EMA_COL].to_numpy(
+    ) if EMA_COL in frame.columns else None
+    sma_source = frame[SMA_COL].to_numpy(
+    ) if SMA_COL in frame.columns else None
     fast, slow = dual_gma(
         close,
         params.fast_length,
@@ -128,7 +153,8 @@ def _chart_payload(
     sell[sell_idx] = True
 
     n = len(frame)
-    clock.emit(88, f"Updating session from {n:,} bars", stage="session", done=0, total=n)
+    clock.emit(
+        88, f"Updating session from {n:,} bars", stage="session", done=0, total=n)
     chunk_size = 2_500
     chunk_start = 0
     bars = []
@@ -150,10 +176,13 @@ def _chart_payload(
                 "gma_fast": _finite(float(fast[i])),
                 "gma_slow": _finite(float(slow[i])),
                 "signal": signal,
+                "call_mark_price": _finite(float(call_prices[i])),
+                "put_mark_price": _finite(float(put_prices[i])),
             }
         )
         if signal:
-            signals.append({"time": unix, "side": signal, "price": float(row.close)})
+            signals.append({"time": unix, "side": signal,
+                           "price": float(row.close)})
         done = i + 1
         if on_progress is not None and (done % chunk_size == 0 or done == n):
             chunk = bars[chunk_start:]
@@ -167,11 +196,12 @@ def _chart_payload(
                 extra={"bars": chunk, "append": True},
             )
 
-    clock.emit(99, f"Ready {len(bars):,} bars", stage="session", done=n, total=n)
+    clock.emit(99, f"Ready {len(bars):,} bars",
+               stage="session", done=n, total=n)
     return {
         "symbol": symbol,
         "timeframe": timeframe,
-        "fingerprint": entry.fingerprint,
+        "fingerprint": response_fingerprint,
         "updated": entry.updated.isoformat() if entry.updated else None,
         "loaded_at": entry.loaded_at.isoformat(),
         "bar_count": len(bars),
@@ -195,7 +225,8 @@ def _sse(event: dict) -> str:
     try:
         payload = json.dumps(event, allow_nan=False, default=_json_default)
     except (TypeError, ValueError) as exc:
-        payload = json.dumps({"type": "error", "detail": f"Result not serializable: {exc}"})
+        payload = json.dumps(
+            {"type": "error", "detail": f"Result not serializable: {exc}"})
     return f"data: {payload}\n\n"
 
 
@@ -212,7 +243,8 @@ def _sse_job(work) -> StreamingResponse:
             try:
                 work(emit)
             except HTTPException as exc:
-                detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+                detail = exc.detail if isinstance(
+                    exc.detail, str) else str(exc.detail)
                 emit({"type": "error", "detail": detail})
             except Exception as exc:
                 emit({"type": "error", "detail": str(exc)})
@@ -253,9 +285,11 @@ def catalog() -> dict:
         symbols = list_symbols()
         trade_names = list_trade_symbols()
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to list symbols: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"Failed to list symbols: {exc}") from exc
     trade_lower = {name.lower() for name in trade_names}
     ohlcv: dict[str, list[str]] = {}
+    continuous: dict[str, list[str]] = {}
     dropdown: dict[str, list[str]] = {}
     has_trades: dict[str, bool] = {}
     for symbol in symbols:
@@ -264,6 +298,7 @@ def catalog() -> dict:
         except Exception:
             existing = []
         ohlcv[symbol] = existing
+        continuous[symbol] = list_continuous_timeframes(symbol)
         dropdown[symbol] = existing
         has_trades[symbol] = symbol.lower() in trade_lower
     return {
@@ -271,6 +306,7 @@ def catalog() -> dict:
         "prefix": "ohlcv",
         "symbols": dropdown,
         "ohlcv_timeframes": ohlcv,
+        "continuous_timeframes": continuous,
         "has_trades": has_trades,
         "aggregates": PRESETS,
     }
@@ -281,7 +317,8 @@ def symbols() -> dict:
     try:
         return {"symbols": list_symbols()}
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to list symbols: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"Failed to list symbols: {exc}") from exc
 
 
 @app.get("/api/timeframes")
@@ -289,7 +326,8 @@ def timeframes(symbol: str = Query(..., min_length=1)) -> dict:
     try:
         return {"symbol": symbol, "timeframes": list_timeframes(symbol)}
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to list timeframes: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"Failed to list timeframes: {exc}") from exc
 
 
 @app.get("/api/meta")
@@ -301,7 +339,8 @@ def meta(
     try:
         fp = fingerprint(symbol, timeframe, source)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Failed to stat GCS: {exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"Failed to stat GCS: {exc}") from exc
     cached = store.peek(symbol, timeframe, source)
     return {
         "symbol": symbol,
@@ -391,7 +430,8 @@ async def optimize(
         except FileNotFoundError:
             return None
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Failed to read {spec}: {exc}") from exc
+            raise HTTPException(
+                status_code=502, detail=f"Failed to read {spec}: {exc}") from exc
         if entry.frame.empty or "close" not in entry.frame.columns:
             return None
         close = entry.frame["close"].to_numpy(dtype=np.float64)
@@ -415,9 +455,46 @@ async def optimize(
         result = run_optimize(
             symbol, metric, load_series, on_progress=on_progress, timeframe=timeframe
         )
-        emit({"type": "done", "result": result})
+        slim, viz = split_viz(result)
+        try:
+            save_optimize_result(result)
+            emit({"type": "done", "result": slim})
+        except Exception:
+            emit({"type": "done", "result": result if viz else slim})
 
     return _sse_job(work)
+
+
+@app.get("/api/results")
+def results_catalog() -> dict:
+    return list_results()
+
+
+@app.get("/api/results/summary")
+def results_summary(
+    symbol: str = Query(..., min_length=1),
+    metric: str = Query(..., min_length=1),
+) -> dict:
+    try:
+        return load_summary(symbol, metric)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/results/detail")
+def results_detail(
+    symbol: str = Query(..., min_length=1),
+    metric: str = Query(..., min_length=1),
+    timeframe: str = Query(..., min_length=1),
+) -> dict:
+    try:
+        return load_result(symbol, metric, timeframe)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/api/events")

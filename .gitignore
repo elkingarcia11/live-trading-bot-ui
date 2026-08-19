@@ -7,7 +7,7 @@ gcs-sa.json
 !.env.example
 
 # Python
-.venv/
+.venv*/
 venv/
 env/
 __pycache__/
@@ -32,6 +32,9 @@ yarn-error.log*
 
 # Local data
 *.parquet
+*.csv.zst
+GLBX-*/
+results/
 
 # OS / editor
 .DS_Store
