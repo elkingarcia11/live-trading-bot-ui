@@ -43,3 +43,5 @@ Thumbs.db
 .vscode/
 *.swp
 *~
+
+.venv311

@@ -4,6 +4,8 @@
 !.env.example
 .git/
 .gitignore
+/cloudbuild.yaml
+/scripts/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
