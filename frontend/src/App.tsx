@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Chart, { CHART_ZONES, formatChartTime, type ChartZone } from "./Chart";
 import { fetchCatalog, fetchMeta, streamChart, watchUrl } from "./api";
-import { DEFAULT_PARAMS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_SIGMA_MAX, GMA_SIGMA_MIN, gmaScale, isValidGmaPair, type Bar, type GmaParams } from "./types";
+import { DEFAULT_PARAMS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_SIGMA_MAX, GMA_SIGMA_MIN, gmaScale, isValidGmaPair, type Bar, type GmaParams, type LoadProgress } from "./types";
 
 import { computeTradeStats, formatActions, formatPct, formatPoints, formatWinRateLine, isUpAction, withActions } from "./tradeStats";
 
@@ -30,6 +30,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "live" | "stale">("idle");
   const [busy, setBusy] = useState(false);
+  const [applyingGma, setApplyingGma] = useState(false);
+  const [chartProgress, setChartProgress] = useState<LoadProgress | null>(null);
   const [gmaApplied, setGmaApplied] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const fingerprintRef = useRef("");
@@ -83,7 +85,7 @@ export default function App() {
           nextTf,
           nextParams,
           refresh,
-          () => undefined,
+          (progress) => setChartProgress(progress),
           dataSource
         );
         if (requestId !== requestRef.current) return;
@@ -97,11 +99,19 @@ export default function App() {
         setError(null);
       } catch (err) {
         if (requestId !== requestRef.current) return;
-        setError(err instanceof Error ? err.message : String(err));
-        setStatus("stale");
+        const message = err instanceof Error ? err.message : String(err);
+        if (message === "Stream closed before it finished") {
+          setError(null);
+          setStatus("loading");
+        } else {
+          setError(message);
+          setStatus("stale");
+        }
       } finally {
         if (requestId === requestRef.current) {
           setBusy(false);
+          setChartProgress(null);
+          setApplyingGma(false);
         }
       }
     },
@@ -174,6 +184,8 @@ export default function App() {
 
   const applyGma = () => {
     if (!locked && gmaPairOk) {
+      setApplyingGma(true);
+      setStatus("loading");
       setParams(draft);
       setGmaApplied(true);
     }
@@ -231,7 +243,9 @@ export default function App() {
           {locked
             ? "Locked"
             : busy
-                ? "Pulling…"
+                ? chartProgress?.total
+                  ? `Loading ${Math.round(chartProgress.pct)}%`
+                  : "Loading…"
                 : "Refresh GCS"}
         </button>
         <div className={`live-pill ${locked ? "paused" : status}`}>
@@ -354,7 +368,11 @@ export default function App() {
             disabled={locked || !gmaPairOk || !symbol || !effectiveTf || busy}
             onClick={applyGma}
           >
-            Apply GMAs
+            {applyingGma
+              ? chartProgress?.total
+                ? `Applying GMAs ${Math.round(chartProgress.pct)}%`
+                : "Applying GMAs…"
+              : "Apply GMAs"}
           </button>
         </section>
         <section className="stats">
