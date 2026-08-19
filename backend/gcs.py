@@ -195,8 +195,10 @@ def _parse_csv_timestamp(values: pd.Series) -> pd.Series:
         numeric = values.dropna().abs()
         maximum = numeric.max() if not numeric.empty else 0
         unit = "ns" if maximum > 10**16 else "us" if maximum > 10**13 else "ms"
-        return pd.to_datetime(values, unit=unit, utc=True)
-    return pd.to_datetime(values, utc=True)
+        parsed = pd.to_datetime(values, unit=unit, utc=True)
+    else:
+        parsed = pd.to_datetime(values, format="mixed", utc=True)
+    return parsed.astype("datetime64[ns, UTC]")
 
 
 def _normalize_continuous_csv(frame: pd.DataFrame, name: str) -> pd.DataFrame:
@@ -214,7 +216,9 @@ def _normalize_continuous_csv(frame: pd.DataFrame, name: str) -> pd.DataFrame:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
     return frame.dropna(
         subset=["timestamp", "open", "high", "low", "close"]
-    ).sort_values("timestamp").reset_index(drop=True)[
+    ).sort_values("timestamp").drop_duplicates(
+        subset=["timestamp"], keep="last"
+    ).reset_index(drop=True)[
         ["timestamp", "open", "high", "low", "close", "volume"]
     ]
 
@@ -239,7 +243,9 @@ def _normalize_mark_csv(frame: pd.DataFrame, name: str) -> pd.DataFrame:
     )[["timestamp", "mark_price"]].copy()
     result["timestamp"] = _parse_csv_timestamp(result["timestamp"])
     result["mark_price"] = pd.to_numeric(result["mark_price"], errors="coerce")
-    return result.dropna().sort_values("timestamp").reset_index(drop=True)
+    return result.dropna().sort_values("timestamp").drop_duplicates(
+        subset=["timestamp"], keep="last"
+    ).reset_index(drop=True)
 
 
 def _load_mark_csv(kind: str) -> tuple[pd.DataFrame, str, datetime | None]:
