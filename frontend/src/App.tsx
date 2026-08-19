@@ -28,6 +28,10 @@ function optimizationScore(result: OptimizeResult, metric: OptimizeMetric): stri
   return value == null ? "—" : `${value.toFixed(metric.includes("win_rate") ? 1 : 2)}%`;
 }
 
+function optimizationLabel(metric: OptimizeMetric): string {
+  return OPTIMIZE_OPTIONS.find((option) => option.id === metric)?.label.replace("Maximize ", "") ?? metric;
+}
+
 export default function App() {
   const [catalog, setCatalog] = useState<Record<string, string[]>>({});
   const [symbol, setSymbol] = useState("");
@@ -434,7 +438,7 @@ export default function App() {
         </section>
         <section className="gma-optimizer">
           <h2>Optimize GMAs</h2>
-          <label>
+          <label className="optimizer-feature">
             Feature
             <select
               value={optimizationFeature}
@@ -470,12 +474,14 @@ export default function App() {
           )}
           {optimizationResult && (
             <div className="optimizer-result">
-              <p className="hint">
-                Best {optimizationFeature.replaceAll("_", " ")}: {optimizationScore(optimizationResult, optimizationFeature)}
-              </p>
-              <p className="optimizer-params">
-                F {optimizationResult.params.fast_length}/{optimizationResult.params.fast_sigma.toFixed(1)} · S {optimizationResult.params.slow_length}/{optimizationResult.params.slow_sigma.toFixed(1)}
-              </p>
+              <div className="optimizer-score">
+                <span>Best {optimizationLabel(optimizationFeature)}</span>
+                <strong>{optimizationScore(optimizationResult, optimizationFeature)}</strong>
+              </div>
+              <dl className="optimizer-params">
+                <div><dt>Fast GMA</dt><dd>L {optimizationResult.params.fast_length} · σ {optimizationResult.params.fast_sigma.toFixed(1)}</dd></div>
+                <div><dt>Slow GMA</dt><dd>L {optimizationResult.params.slow_length} · σ {optimizationResult.params.slow_sigma.toFixed(1)}</dd></div>
+              </dl>
               <button
                 type="button"
                 className="optimize apply-gma"

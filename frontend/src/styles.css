@@ -222,6 +222,14 @@ select {
   margin-top: 0;
 }
 
+.gma-optimizer .optimizer-feature {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
 .gma-optimizer select,
 .gma-optimizer > .optimize {
   width: 100%;
@@ -242,11 +250,41 @@ select {
   margin-bottom: 4px;
 }
 
+.optimizer-score {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.optimizer-score strong {
+  color: var(--text);
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
 .optimizer-params {
-  margin: 0;
-  color: var(--accent);
+  margin: 10px 0 0;
+  color: var(--text);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+
+.optimizer-params div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 5px;
+}
+
+.optimizer-params dt {
+  color: var(--muted);
+}
+
+.optimizer-params dd {
+  margin: 0;
 }
 
 .sidebar .timezone select {
@@ -449,6 +487,24 @@ input[type="range"] {
   font-size: 10px;
   line-height: 1.35;
   white-space: nowrap;
+}
+
+@media (max-width: 700px) {
+  .stage > .legend {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: center;
+    gap: 6px 12px;
+  }
+
+  .stage > .legend h2 {
+    grid-column: 1 / -1;
+  }
+
+  .stage > .legend div {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
 }
 
 .chart-host {
