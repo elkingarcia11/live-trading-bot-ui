@@ -30,6 +30,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "live" | "stale">("idle");
   const [busy, setBusy] = useState(false);
+  const [gmaApplied, setGmaApplied] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const fingerprintRef = useRef("");
   const paramsRef = useRef(params);
@@ -43,7 +44,10 @@ export default function App() {
   const dataSource = "continuous" as const;
   const last = bars.at(-1) ?? null;
   const labeledBars = useMemo(() => withActions(bars), [bars]);
-  const tradeStats = useMemo(() => computeTradeStats(labeledBars), [labeledBars]);
+  const tradeStats = useMemo(
+    () => (gmaApplied ? computeTradeStats(labeledBars) : computeTradeStats([])),
+    [gmaApplied, labeledBars]
+  );
   const fastScale = gmaScale(draft.fastLength, draft.fastSigma);
   const slowScale = gmaScale(draft.slowLength, draft.slowSigma);
   const gmaPairOk = isValidGmaPair(draft);
@@ -165,10 +169,14 @@ export default function App() {
   const resetSeriesControls = () => {
     setDraft(DEFAULT_PARAMS);
     setParams(DEFAULT_PARAMS);
+    setGmaApplied(false);
   };
 
   const applyGma = () => {
-    if (!locked && gmaPairOk) setParams(draft);
+    if (!locked && gmaPairOk) {
+      setParams(draft);
+      setGmaApplied(true);
+    }
   };
 
   return (
@@ -346,7 +354,7 @@ export default function App() {
             disabled={locked || !gmaPairOk || !symbol || !effectiveTf || busy}
             onClick={applyGma}
           >
-            Apply GMA
+            Apply GMAs
           </button>
         </section>
         <section className="stats">
@@ -446,7 +454,12 @@ export default function App() {
       <main className="stage">
         {error && <div className="banner">{error}</div>}
         <div className="chart-panel">
-          <Chart bars={labeledBars} fitKey={`${symbol}|${effectiveTf}`} timeZone={chartZone} />
+          <Chart
+            bars={labeledBars}
+            fitKey={`${symbol}|${effectiveTf}`}
+            timeZone={chartZone}
+            showIndicators={gmaApplied}
+          />
         </div>
         <section className="legend">
           <h2>Legend</h2>

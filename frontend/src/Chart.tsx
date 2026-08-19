@@ -22,6 +22,7 @@ interface Props {
   bars: Bar[];
   fitKey: string;
   timeZone: ChartZone;
+  showIndicators: boolean;
 }
 
 function ianaFor(zone: ChartZone): string | undefined {
@@ -49,7 +50,7 @@ export function formatChartTime(unix: number, zone: ChartZone, withDate = false)
   return new Date(unix * 1000).toLocaleString("en-US", dateOpts(zone, withDate));
 }
 
-export default function Chart({ bars, fitKey, timeZone }: Props) {
+export default function Chart({ bars, fitKey, timeZone, showIndicators }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -194,14 +195,18 @@ export default function Chart({ bars, fitKey, timeZone }: Props) {
       }))
     );
     fastRef.current.setData(
-      unique
-        .filter((bar) => bar.gma_fast != null)
-        .map((bar) => ({ time: bar.time as UTCTimestamp, value: bar.gma_fast as number }))
+      showIndicators
+        ? unique
+            .filter((bar) => bar.gma_fast != null)
+            .map((bar) => ({ time: bar.time as UTCTimestamp, value: bar.gma_fast as number }))
+        : []
     );
     slowRef.current.setData(
-      unique
-        .filter((bar) => bar.gma_slow != null)
-        .map((bar) => ({ time: bar.time as UTCTimestamp, value: bar.gma_slow as number }))
+      showIndicators
+        ? unique
+            .filter((bar) => bar.gma_slow != null)
+            .map((bar) => ({ time: bar.time as UTCTimestamp, value: bar.gma_slow as number }))
+        : []
     );
     volumeRef.current.setData(
       unique.map((bar) => ({
@@ -211,9 +216,10 @@ export default function Chart({ bars, fitKey, timeZone }: Props) {
       }))
     );
     candleRef.current.setMarkers(
-      unique
-        .filter((bar) => bar.actions?.length)
-        .map((bar) => {
+      showIndicators
+        ? unique
+            .filter((bar) => bar.actions?.length)
+            .map((bar) => {
           const callish =
             bar.actions!.includes("open_call") || bar.actions!.includes("close_put");
           return {
@@ -224,8 +230,9 @@ export default function Chart({ bars, fitKey, timeZone }: Props) {
             size: 2.5,
             text: `CALL ${bar.call_mark_price == null ? "—" : bar.call_mark_price.toFixed(2)} | ` +
               `PUT ${bar.put_mark_price == null ? "—" : bar.put_mark_price.toFixed(2)}`,
-          };
-        })
+              };
+            })
+        : []
     );
     if (fittedKeyRef.current !== fitKey) {
       fittedKeyRef.current = fitKey;
@@ -233,7 +240,7 @@ export default function Chart({ bars, fitKey, timeZone }: Props) {
     } else {
       chartRef.current?.timeScale().scrollToRealTime();
     }
-  }, [bars, fitKey]);
+  }, [bars, fitKey, showIndicators]);
 
   return <div className="chart-host" ref={hostRef} />;
 }
