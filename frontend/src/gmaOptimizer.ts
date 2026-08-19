@@ -149,7 +149,7 @@ self.onmessage = (event) => {
   const fastGrid = grid.map((param) => gaussianMA(ema, param.length, param.sigma));
   const slowGrid = grid.map((param) => gaussianMA(sma, param.length, param.sigma));
   const pairs = [];
-  for (let fast = 0; fast < grid.length; fast++) for (let slow = 0; slow < grid.length; slow++) if (grid[fast].ratio < grid[slow].ratio) pairs.push([fast, slow]);
+  for (let fast = 0; fast < grid.length; fast++) for (let slow = 0; slow < grid.length; slow++) if (grid[fast].length < grid[slow].length && grid[fast].ratio < grid[slow].ratio) pairs.push([fast, slow]);
   let best = null;
   for (let i = 0; i < pairs.length; i++) {
     const [fastIndex, slowIndex] = pairs[i];
