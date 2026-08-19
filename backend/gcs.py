@@ -25,7 +25,6 @@ BUCKET_NAME = os.environ.get("GCS_BUCKET", "live-trading-bot")
 OHLCV_PREFIX = "ohlcv/"
 TRADES_PREFIX = "trades/"
 CONTINUOUS_PREFIX = "continuous_data/"
-MARK_FILES = {"call": "call.csv", "put": "put.csv"}
 _LOCAL_KEY = Path(__file__).resolve().parent.parent / "gcs-sa.json"
 
 
@@ -223,57 +222,6 @@ def _normalize_continuous_csv(frame: pd.DataFrame, name: str) -> pd.DataFrame:
     ]
 
 
-def _normalize_mark_csv(frame: pd.DataFrame, name: str) -> pd.DataFrame:
-    frame.columns = [str(column).lower() for column in frame.columns]
-    timestamp_column = next(
-        (column for column in ("timestamp", "ts_event", "ts_recv", "datetime", "time")
-         if column in frame.columns),
-        None,
-    )
-    mark_column = next(
-        (column for column in ("mark_price", "mark", "price", "close")
-         if column in frame.columns),
-        None,
-    )
-    if timestamp_column is None or mark_column is None:
-        raise ValueError(
-            f"{name} must include a timestamp and mark price column")
-    result = frame.rename(
-        columns={timestamp_column: "timestamp", mark_column: "mark_price"}
-    )[["timestamp", "mark_price"]].copy()
-    result["timestamp"] = _parse_csv_timestamp(result["timestamp"])
-    result["mark_price"] = pd.to_numeric(result["mark_price"], errors="coerce")
-    return result.dropna().sort_values("timestamp").drop_duplicates(
-        subset=["timestamp"], keep="last"
-    ).reset_index(drop=True)
-
-
-def _load_mark_csv(kind: str) -> tuple[pd.DataFrame, str, datetime | None]:
-    bucket = _client().bucket(BUCKET_NAME)
-    name = MARK_FILES[kind]
-    blobs = list(bucket.list_blobs(prefix=name))
-    blob = next((item for item in blobs if item.name == name), None)
-    if blob is None:
-        return pd.DataFrame(columns=["timestamp", "mark_price"]), "", None
-    frame = pd.read_csv(io.BytesIO(blob.download_as_bytes()))
-    updated = blob.updated or datetime.now(timezone.utc)
-    if updated.tzinfo is None:
-        updated = updated.replace(tzinfo=timezone.utc)
-    return _normalize_mark_csv(frame, name), f"{name}:{blob.generation}", updated
-
-
-def _mark_fingerprint() -> str:
-    bucket = _client().bucket(BUCKET_NAME)
-    parts = []
-    for kind in ("call", "put"):
-        name = MARK_FILES[kind]
-        blob = next((item for item in bucket.list_blobs(
-            prefix=name) if item.name == name), None)
-        if blob is not None:
-            parts.append(f"{name}:{blob.generation}")
-    return "|".join(parts)
-
-
 def load_continuous(
     symbol: str,
     timeframe: str,
@@ -309,8 +257,7 @@ def fingerprint(symbol: str, timeframe: str, source: str | None = None) -> str:
             symbol) if use_trades else list_parquet_objects(symbol, timeframe)
     if not objects:
         return ""
-    result = "|".join(f"{item.name}:{item.generation}" for item in objects)
-    return f"{result}|{_mark_fingerprint()}" if source == "continuous" else result
+    return "|".join(f"{item.name}:{item.generation}" for item in objects)
 
 
 @dataclass
@@ -444,19 +391,6 @@ class OhlcvStore:
     _agg: dict[tuple[str, str], CacheEntry] = field(default_factory=dict)
     _continuous: dict[tuple[str, str], CacheEntry] = field(
         default_factory=dict)
-    _marks: tuple[pd.DataFrame, pd.DataFrame, str] | None = None
-
-    def get_mark_prices(
-        self,
-        refresh: bool = False,
-    ) -> tuple[pd.DataFrame, pd.DataFrame, str]:
-        if self._marks is not None and not refresh:
-            return self._marks
-        call, call_fp, _ = _load_mark_csv("call")
-        put, put_fp, _ = _load_mark_csv("put")
-        result = (call, put, f"{call_fp}|{put_fp}")
-        self._marks = result
-        return result
 
     def get(
         self,

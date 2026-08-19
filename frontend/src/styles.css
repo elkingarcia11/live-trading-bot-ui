@@ -305,13 +305,6 @@ input[type="range"] {
 .swatch.slow {
   background: var(--slow);
 }
-.swatch.call-mark {
-  background: #00e676;
-}
-.swatch.put-mark {
-  background: #ff5252;
-}
-
 .arrow {
   display: inline-block;
   width: 0;

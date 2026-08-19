@@ -11,8 +11,6 @@ export interface Bar {
   gma_fast: number | null;
   gma_slow: number | null;
   signal: SignalSide | null;
-  call_mark_price: number | null;
-  put_mark_price: number | null;
   actions?: Action[];
 }
 

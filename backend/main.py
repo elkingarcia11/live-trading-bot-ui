@@ -58,19 +58,6 @@ def _finite(value: float) -> float | None:
     return float(value)
 
 
-def _marks_after(candle_timestamps, marks) -> np.ndarray:
-    values = np.full(len(candle_timestamps), np.nan)
-    if marks.empty:
-        return values
-    candle_ns = candle_timestamps.astype("int64").to_numpy()
-    mark_ns = marks["timestamp"].astype("int64").to_numpy()
-    indices = np.searchsorted(mark_ns, candle_ns, side="left")
-    valid = indices < len(marks)
-    if valid.any():
-        values[valid] = marks["mark_price"].to_numpy()[indices[valid]]
-    return values
-
-
 def _json_default(value):
     if isinstance(value, (np.floating, np.integer)):
         return value.item()
@@ -108,11 +95,7 @@ def _chart_payload(
 
     clock.source = entry.source
     frame = entry.frame
-    call_marks, put_marks, mark_fingerprint = store.get_mark_prices(
-        refresh=refresh)
-    call_prices = _marks_after(frame["timestamp"], call_marks)
-    put_prices = _marks_after(frame["timestamp"], put_marks)
-    response_fingerprint = f"{entry.fingerprint}|{mark_fingerprint}"
+    response_fingerprint = entry.fingerprint
     if frame.empty:
         return {
             "symbol": symbol,
@@ -176,8 +159,6 @@ def _chart_payload(
                 "gma_fast": _finite(float(fast[i])),
                 "gma_slow": _finite(float(slow[i])),
                 "signal": signal,
-                "call_mark_price": _finite(float(call_prices[i])),
-                "put_mark_price": _finite(float(put_prices[i])),
             }
         )
         if signal:

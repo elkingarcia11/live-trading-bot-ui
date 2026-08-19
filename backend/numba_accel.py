@@ -61,8 +61,8 @@ def score_events_nb(
                     call_wins += 1
                 side = 0
             elif side == -1:
-                pnl = (entry - price) * -1.0
-                pct = pnl / price * 100.0 if price != 0.0 else 0.0
+                pnl = entry - price
+                pct = pnl / entry * 100.0 if entry != 0.0 else 0.0
                 put_profit += pnl
                 put_pct_sum += pct
                 close_puts += 1
@@ -74,8 +74,8 @@ def score_events_nb(
         if b == idx:
             bi += 1
             if side == -1:
-                pnl = (entry - price) * -1.0
-                pct = pnl / price * 100.0 if price != 0.0 else 0.0
+                pnl = entry - price
+                pct = pnl / entry * 100.0 if entry != 0.0 else 0.0
                 put_profit += pnl
                 put_pct_sum += pct
                 close_puts += 1
@@ -156,8 +156,8 @@ def equity_stats_nb(
                     wins += 1
                 side = 0
             elif side == -1:
-                pnl = (entry - price) * -1.0
-                pct = pnl / price * 100.0 if price != 0.0 else 0.0
+                pnl = entry - price
+                pct = pnl / entry * 100.0 if entry != 0.0 else 0.0
                 put_pct_sum += pct
                 close_puts += 1
                 if pnl > 0:
@@ -165,8 +165,8 @@ def equity_stats_nb(
                 side = 0
         elif is_buy[i]:
             if side == -1:
-                pnl = (entry - price) * -1.0
-                pct = pnl / price * 100.0 if price != 0.0 else 0.0
+                pnl = entry - price
+                pct = pnl / entry * 100.0 if entry != 0.0 else 0.0
                 put_pct_sum += pct
                 close_puts += 1
                 if pnl > 0:
@@ -191,8 +191,8 @@ def equity_stats_nb(
         if side == 1:
             equity += (price - entry) / entry * 100.0 if entry != 0.0 else 0.0
         elif side == -1:
-            equity += ((entry - price) * -1.0) / price * \
-                100.0 if price != 0.0 else 0.0
+            equity += (entry - price) / entry * \
+                100.0 if entry != 0.0 else 0.0
         if equity > peak:
             peak = equity
         if equity < trough:

@@ -66,8 +66,8 @@ def call_pnl(buy_price: float, sell_price: float) -> float:
 
 
 def put_pnl(sell_price: float, buy_price: float) -> float:
-    """Open put then close put. Profit = (buy − sell) × −1."""
-    return (buy_price - sell_price) * -1.0
+    """Open short ES then close it. Profit = sell − buy."""
+    return sell_price - buy_price
 
 
 def call_pct(buy_price: float, sell_price: float) -> float:

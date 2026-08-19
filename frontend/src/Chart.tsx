@@ -228,8 +228,6 @@ export default function Chart({ bars, fitKey, timeZone, showIndicators }: Props)
             color: callish ? "#00e676" : "#ff5252",
             shape: (callish ? "arrowUp" : "arrowDown") as "arrowUp" | "arrowDown",
             size: 2.5,
-            text: `CALL ${bar.call_mark_price == null ? "—" : bar.call_mark_price.toFixed(2)} | ` +
-              `PUT ${bar.put_mark_price == null ? "—" : bar.put_mark_price.toFixed(2)}`,
               };
             })
         : []

@@ -420,36 +420,36 @@ export default function App() {
               </dd>
             </div>
             <div className="group-start">
-              <dt>Call %</dt>
+              <dt>Long %</dt>
               <dd className={tradeStats.callProfitPct >= 0 ? "buy" : "sell"}>
                 {formatPct(tradeStats.callProfitPct)}
               </dd>
             </div>
             <div>
-              <dt>Call win rate</dt>
+              <dt>Long win rate</dt>
               <dd>
                 {formatWinRateLine(tradeStats.callWinRate, tradeStats.callWins, tradeStats.closeCalls)}
               </dd>
             </div>
-            <div><dt>Open calls</dt><dd className="buy">{tradeStats.openCalls}</dd></div>
-            <div><dt>Close calls</dt><dd className="buy">{tradeStats.closeCalls}</dd></div>
+            <div><dt>Open longs</dt><dd className="buy">{tradeStats.openCalls}</dd></div>
+            <div><dt>Close longs</dt><dd className="buy">{tradeStats.closeCalls}</dd></div>
             <div className="group-start">
-              <dt>Put %</dt>
+              <dt>Short %</dt>
               <dd className={tradeStats.putProfitPct >= 0 ? "buy" : "sell"}>
                 {formatPct(tradeStats.putProfitPct)}
               </dd>
             </div>
             <div>
-              <dt>Put win rate</dt>
+              <dt>Short win rate</dt>
               <dd>
                 {formatWinRateLine(tradeStats.putWinRate, tradeStats.putWins, tradeStats.closePuts)}
               </dd>
             </div>
-            <div><dt>Open puts</dt><dd className="sell">{tradeStats.openPuts}</dd></div>
-            <div><dt>Close puts</dt><dd className="sell">{tradeStats.closePuts}</dd></div>
+            <div><dt>Open shorts</dt><dd className="sell">{tradeStats.openPuts}</dd></div>
+            <div><dt>Close shorts</dt><dd className="sell">{tradeStats.closePuts}</dd></div>
             {tradeStats.openPosition && tradeStats.unrealized != null && tradeStats.unrealizedPct != null && (
               <div className="group-start">
-                <dt>Open {tradeStats.openSide === "long" ? "call" : "put"}</dt>
+                <dt>Open {tradeStats.openSide === "long" ? "long" : "short"}</dt>
                 <dd className={tradeStats.unrealized >= 0 ? "buy" : "sell"}>
                   {formatPoints(tradeStats.unrealized)} / {formatPct(tradeStats.unrealizedPct)}
                 </dd>
@@ -483,10 +483,8 @@ export default function App() {
           <h2>Legend</h2>
           <div><i className="swatch fast" /> Fast GMA (EMA 3)</div>
           <div><i className="swatch slow" /> Slow GMA (SMA 3)</div>
-          <div><i className="swatch call-mark" /> Call mark price</div>
-          <div><i className="swatch put-mark" /> Put mark price</div>
-          <div><i className="arrow buy" /> Open call / close put</div>
-          <div><i className="arrow sell" /> Open put / close call</div>
+          <div><i className="arrow buy" /> Long entry / short exit</div>
+          <div><i className="arrow sell" /> Short entry / long exit</div>
         </section>
       </main>
 
