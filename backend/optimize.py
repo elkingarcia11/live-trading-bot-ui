@@ -20,6 +20,7 @@ from backend.viz import build_viz, concat_trials, trial_row, trials_from_rows, t
 # Length 5–30 every integer; above 30 only multiples of 5. Sigma 1–10 step 0.5.
 # Fast vs slow is length/sigma, not raw length: a valid pair has
 # (fast_length / fast_sigma) < (slow_length / slow_sigma).
+# Every tested configuration also has length/sigma <= 5.
 LENGTHS = list(range(5, 31)) + list(range(35, 101, 5))
 SIGMAS = [round(x * 0.5, 1) for x in range(2, 21)]  # 1.0 .. 10.0
 MIN_TRADES = 3
@@ -443,9 +444,14 @@ def _is_fast_slow(flen: int, fsig: float, slen: int, ssig: float) -> bool:
     return flen / fsig < slen / ssig
 
 
+def _is_valid_config(length: int, sigma: float, n: int) -> bool:
+    return length <= n and length / sigma <= 5
+
+
 def _pair_count(n: int) -> int:
     configs = [(length, sigma)
-               for length, sigma in product(LENGTHS, SIGMAS) if length <= n]
+               for length, sigma in product(LENGTHS, SIGMAS)
+               if _is_valid_config(length, sigma, n)]
     return sum(
         1
         for (flen, fsig), (slen, ssig) in product(configs, configs)
@@ -459,7 +465,9 @@ def _emit(on_progress: ProgressFn | None, payload: dict) -> None:
 
 
 def _gma_jobs(n: int) -> list[tuple[int, float]]:
-    return [(length, sigma) for length, sigma in product(LENGTHS, SIGMAS) if length <= n]
+    return [(length, sigma)
+            for length, sigma in product(LENGTHS, SIGMAS)
+            if _is_valid_config(length, sigma, n)]
 
 
 def _gma_configs(

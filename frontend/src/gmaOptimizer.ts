@@ -145,7 +145,9 @@ self.onmessage = (event) => {
   const sma = sourceSma(close, 3);
   const masks = sessionMasks(times);
   const grid = [];
-  for (const length of LENGTHS) for (const sigma of SIGMAS) grid.push({ length, sigma, ratio: length / sigma });
+  for (const length of LENGTHS) for (const sigma of SIGMAS) {
+    if (length / sigma <= 5) grid.push({ length, sigma, ratio: length / sigma });
+  }
   const fastGrid = grid.map((param) => gaussianMA(ema, param.length, param.sigma));
   const slowGrid = grid.map((param) => gaussianMA(sma, param.length, param.sigma));
   const pairs = [];
