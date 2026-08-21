@@ -79,7 +79,9 @@ export interface TradeStats {
   callProfitPct: number;
   putProfitPct: number;
   maxDrawdownPct: number;
+  avgMaxDrawdownPct: number;
   maxRunupPct: number;
+  avgMaxRunupPct: number;
   openCalls: number;
   closeCalls: number;
   openPuts: number;
@@ -173,7 +175,9 @@ export function computeTradeStats(bars: Bar[]): TradeStats {
     callProfitPct: 0,
     putProfitPct: 0,
     maxDrawdownPct: 0,
+    avgMaxDrawdownPct: 0,
     maxRunupPct: 0,
+    avgMaxRunupPct: 0,
     openCalls: 0,
     closeCalls: 0,
     openPuts: 0,
@@ -203,7 +207,11 @@ export function computeTradeStats(bars: Bar[]): TradeStats {
   let closePuts = 0;
   let lastActions: Action[] = [];
   let maxDrawdownPct = 0;
+  let totalDrawdownPct = 0;
+  let drawdownTrades = 0;
   let maxRunupPct = 0;
+  let totalRunupPct = 0;
+  let runupTrades = 0;
   let tradeLow: number | null = null;
   let tradeHigh: number | null = null;
 
@@ -226,11 +234,13 @@ export function computeTradeStats(bars: Bar[]): TradeStats {
             tradeLow == null ? exitPrice : Math.min(tradeLow, exitPrice);
           const high =
             tradeHigh == null ? exitPrice : Math.max(tradeHigh, exitPrice);
-          maxDrawdownPct = Math.min(
-            maxDrawdownPct,
-            ((entry - high) / entry) * 100,
-          );
+          const drawdownPct = ((entry - high) / entry) * 100;
+          maxDrawdownPct = Math.min(maxDrawdownPct, drawdownPct);
+          totalDrawdownPct += drawdownPct;
+          drawdownTrades += 1;
           maxRunupPct = Math.max(maxRunupPct, ((entry - low) / entry) * 100);
+          totalRunupPct += ((entry - low) / entry) * 100;
+          runupTrades += 1;
         }
         entry = null;
         side = null;
@@ -252,11 +262,13 @@ export function computeTradeStats(bars: Bar[]): TradeStats {
             tradeLow == null ? exitPrice : Math.min(tradeLow, exitPrice);
           const high =
             tradeHigh == null ? exitPrice : Math.max(tradeHigh, exitPrice);
-          maxDrawdownPct = Math.min(
-            maxDrawdownPct,
-            ((low - entry) / entry) * 100,
-          );
+          const drawdownPct = ((low - entry) / entry) * 100;
+          maxDrawdownPct = Math.min(maxDrawdownPct, drawdownPct);
+          totalDrawdownPct += drawdownPct;
+          drawdownTrades += 1;
           maxRunupPct = Math.max(maxRunupPct, ((high - entry) / entry) * 100);
+          totalRunupPct += ((high - entry) / entry) * 100;
+          runupTrades += 1;
         }
         entry = null;
         side = null;
@@ -316,7 +328,10 @@ export function computeTradeStats(bars: Bar[]): TradeStats {
     callProfitPct,
     putProfitPct,
     maxDrawdownPct,
+    avgMaxDrawdownPct:
+      drawdownTrades > 0 ? totalDrawdownPct / drawdownTrades : 0,
     maxRunupPct,
+    avgMaxRunupPct: runupTrades > 0 ? totalRunupPct / runupTrades : 0,
     openCalls,
     closeCalls,
     openPuts,

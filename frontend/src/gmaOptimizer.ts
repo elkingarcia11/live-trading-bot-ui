@@ -6,9 +6,8 @@ import type {
 } from "./types";
 
 const WORKER_SOURCE = `
-const LENGTHS = [...Array(26)].map((_, i) => i + 5).concat([...Array(14)].map((_, i) => 35 + i * 5));
+const LENGTHS = [...Array(30)].map((_, i) => i + 1).concat([...Array(10)].map((_, i) => 32 + i * 2));
 const SIGMAS = [...Array(19)].map((_, i) => (i + 2) * 0.5);
-const MIN_TRADES = 3;
 const ET_FORMAT = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
   hour: "2-digit", minute: "2-digit", hour12: false, hourCycle: "h23"
@@ -140,7 +139,9 @@ function score(close, high, low, events) {
 }
 
 self.onmessage = (event) => {
-  const { close, high, low, times, symbol, timeframe, metric } = event.data;
+  const { close, high, low, times, symbol, timeframe, metric, minTrades, maxTrades } = event.data;
+  const minT = Math.max(1, Number.isFinite(minTrades) ? minTrades : 1);
+  const maxT = Number.isFinite(maxTrades) ? maxTrades : Infinity;
   const ema = sourceEma(close, 3);
   const sma = sourceSma(close, 3);
   const masks = sessionMasks(times);
@@ -163,7 +164,7 @@ self.onmessage = (event) => {
       : metric === "call_profit_pct" ? stats.longProfitPct
       : metric === "put_profit_pct" ? stats.shortProfitPct
       : metric === "max_runup_pct" ? stats.maxRunup : stats.avgMaxRunup;
-    if (stats.closed >= MIN_TRADES && (!best || value > best.value)) best = { value, fastIndex, slowIndex, stats };
+    if (stats.closed >= minT && stats.closed <= maxT && (!best || value > best.value)) best = { value, fastIndex, slowIndex, stats };
     if (i % 250 === 0 || i === pairs.length - 1) self.postMessage({ type: "progress", pct: 5 + i / pairs.length * 95, frame: i, frames: pairs.length, tested: i + 1, total: pairs.length, timeframe, message: "Testing GMA parameter pairs" });
   }
   if (!best) throw new Error("No GMA combination produced enough closed trades");
@@ -199,11 +200,30 @@ interface WorkerDone {
   result: OptimizeResult;
 }
 
-export function runFrontendOptimization(
+export interface CrossTfResult extends OptimizeResult {
+  timeframe: string;
+  /** Input-order index used for deterministic tiebreaking only. */
+  _tfIndex: number;
+}
+
+export interface CrossTfProgress {
+  type: "progress";
+  pct: number;
+  timeframe: string;
+  timeframesDone: string[];
+  totalTimeframes: number;
+  tested: number;
+  total: number;
+  message: string;
+}
+
+function runSingleOptimize(
   bars: Bar[],
   symbol: string,
   timeframe: string,
   metric: OptimizeMetric,
+  minTrades: number,
+  maxTrades: number | null,
   onProgress: (progress: OptimizeProgress) => void,
 ): Promise<OptimizeResult> {
   return new Promise((resolve, reject) => {
@@ -235,10 +255,160 @@ export function runFrontendOptimization(
       cleanup();
       reject(new Error(event.message || "Frontend optimization failed"));
     };
-    worker.postMessage({ close, high, low, times, symbol, timeframe, metric }, [
-      close.buffer,
-      high.buffer,
-      low.buffer,
-    ]);
+    worker.postMessage(
+      {
+        close,
+        high,
+        low,
+        times,
+        symbol,
+        timeframe,
+        metric,
+        minTrades,
+        maxTrades,
+      },
+      [close.buffer, high.buffer, low.buffer],
+    );
   });
+}
+
+export function runFrontendOptimization(
+  bars: Bar[],
+  symbol: string,
+  timeframe: string,
+  metric: OptimizeMetric,
+  minTrades: number,
+  maxTrades: number | null,
+  onProgress: (progress: OptimizeProgress) => void,
+): Promise<OptimizeResult> {
+  return runSingleOptimize(
+    bars,
+    symbol,
+    timeframe,
+    metric,
+    minTrades,
+    maxTrades,
+    onProgress,
+  );
+}
+
+/**
+ * Runs the same frontend grid-search worker on multiple timeframes and
+ * returns the best (timeframe + GMA params) for the given metric.
+ *
+ * Timeframes are processed concurrently via a bounded pool of Web Workers
+ * (one worker per timeframe, capped at the device's hardware concurrency).
+ * Each worker runs an independent grid search, so there is no shared mutable
+ * compute state. Result aggregation is serialized on the main thread and uses
+ * a deterministic tiebreak (higher metric score, then more closed trades, then
+ * earlier input order) so the outcome is identical regardless of completion
+ * order — no race conditions or illogical ordering.
+ */
+export async function runMultiTimeframeOptimization(
+  series: { timeframe: string; bars: Bar[] }[],
+  symbol: string,
+  metric: OptimizeMetric,
+  minTrades: number,
+  maxTrades: number | null,
+  onProgress: (progress: CrossTfProgress) => void,
+): Promise<CrossTfResult> {
+  const total = series.length;
+  if (total === 0) throw new Error("No timeframes to optimize");
+
+  // Bounded concurrency: never spawn more workers than we have cores, and
+  // never more than the number of timeframes. Fall back to 4 if the browser
+  // does not report hardware concurrency.
+  const concurrency = Math.max(
+    1,
+    Math.min(
+      total,
+      typeof navigator !== "undefined" && navigator.hardwareConcurrency
+        ? navigator.hardwareConcurrency
+        : 4,
+    ),
+  );
+
+  // Deterministic aggregation state. JS is single-threaded on the main
+  // thread, so these updates are naturally serialized; we keep them in one
+  // place to make the ordering explicit and race-free.
+  let best: CrossTfResult | null = null;
+  const doneSet = new Set<number>();
+  let completed = 0;
+
+  const emitProgress = (tfIndex: number, p: OptimizeProgress) => {
+    // Report done timeframes in input order for a logical readout.
+    const timeframesDone = series
+      .map((s) => s.timeframe)
+      .filter((_, i) => doneSet.has(i));
+    onProgress({
+      type: "progress",
+      pct: ((completed + p.pct / 100) / total) * 100,
+      timeframe: series[tfIndex].timeframe,
+      timeframesDone,
+      totalTimeframes: total,
+      tested: p.total,
+      total: p.total,
+      message: `${series[tfIndex].timeframe}: ${Math.round(p.pct)}%${p.total ? ` (${p.total.toLocaleString()} pairs)` : ""}`,
+    });
+  };
+
+  const consider = (tfIndex: number, single: OptimizeResult) => {
+    const timeframe = series[tfIndex].timeframe;
+    if (
+      !best ||
+      metricScore(single, metric) > metricScore(best, metric) ||
+      (metricScore(single, metric) === metricScore(best, metric) &&
+        (single.closed_trades > best.closed_trades ||
+          (single.closed_trades === best.closed_trades &&
+            tfIndex < best._tfIndex)))
+    ) {
+      best = { ...single, timeframe, _tfIndex: tfIndex };
+    }
+  };
+
+  // Simple bounded pool: run up to `concurrency` workers at a time, awaiting
+  // each batch before starting the next. This keeps memory bounded and avoids
+  // spawning an unbounded number of workers.
+  for (let start = 0; start < total; start += concurrency) {
+    const batch = series.slice(start, start + concurrency);
+    const results = await Promise.all(
+      batch.map(async (entry, offset) => {
+        const tfIndex = start + offset;
+        const single = await runSingleOptimize(
+          entry.bars,
+          symbol,
+          entry.timeframe,
+          metric,
+          minTrades,
+          maxTrades,
+          (p) => emitProgress(tfIndex, p),
+        );
+        return { tfIndex, single };
+      }),
+    );
+    for (const { tfIndex, single } of results) {
+      consider(tfIndex, single);
+      doneSet.add(tfIndex);
+      completed++;
+    }
+  }
+
+  if (!best)
+    throw new Error("No GMA combination produced enough closed trades");
+  return best;
+}
+
+function metricScore(result: OptimizeResult, metric: OptimizeMetric): number {
+  switch (metric) {
+    case "total_win_rate":
+      return result.win_rate;
+    case "total_profit_pct":
+      return result.profit_pct;
+    case "max_runup_pct":
+      return result.max_runup_pct ?? Number.NEGATIVE_INFINITY;
+    case "avg_max_runup_pct":
+      return result.avg_max_runup_pct ?? Number.NEGATIVE_INFINITY;
+    default:
+      return Number.NEGATIVE_INFINITY;
+  }
 }

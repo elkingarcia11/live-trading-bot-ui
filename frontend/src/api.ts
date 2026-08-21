@@ -159,6 +159,19 @@ export function fetchMeta(
   );
 }
 
+/** Non-streaming chart load – used by the cross-timeframe optimizer to grab
+ *  bars for every timeframe without attaching progress listeners. */
+export function fetchChart(
+  symbol: string,
+  timeframe: string,
+  source: DataSource,
+): Promise<ChartResponse> {
+  const q = new URLSearchParams({ symbol, timeframe, source });
+  return fetch(`/api/chart?${q.toString()}`).then((r) =>
+    readJson<ChartResponse>(r),
+  );
+}
+
 export async function streamOptimize(
   symbol: string,
   timeframe: string,

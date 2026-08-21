@@ -1,4 +1,4 @@
-"""Grid-search aggregates and GMA params for win rate or closed profit %."""
+"""Grid-search aggregates and GMA params for win rate, profit %, or run-up."""
 
 from __future__ import annotations
 
@@ -17,11 +17,11 @@ from backend.gma import dual_gma, gaussian_ma
 from backend.session import rth_trade_indices, session_masks
 from backend.viz import build_viz, concat_trials, trial_row, trials_from_rows, trials_to_list
 
-# Length 5–30 every integer; above 30 only multiples of 5. Sigma 1–10 step 0.5.
+# Length 1–30 every integer; above 30 only even numbers up to 50. Sigma 1–10 step 0.5.
 # Fast vs slow is length/sigma, not raw length: a valid pair has
 # (fast_length / fast_sigma) < (slow_length / slow_sigma).
 # Every tested configuration also has length/sigma <= 5.
-LENGTHS = list(range(5, 31)) + list(range(35, 101, 5))
+LENGTHS = list(range(1, 31)) + list(range(32, 51, 2))
 SIGMAS = [round(x * 0.5, 1) for x in range(2, 21)]  # 1.0 .. 10.0
 MIN_TRADES = 3
 
@@ -49,6 +49,8 @@ class Trial:
     call_win_rate: float
     put_win_rate: float
     bars: int
+    max_runup_pct: float
+    avg_max_runup_pct: float
 
 
 METRICS = {
@@ -58,16 +60,18 @@ METRICS = {
     "total_profit_pct",
     "call_profit_pct",
     "put_profit_pct",
+    "max_runup_pct",
+    "avg_max_runup_pct",
 }
 
 
 def call_pnl(buy_price: float, sell_price: float) -> float:
-    """Open call then close call. Profit = sell − buy."""
+    """Open call then close call. Profit = sell - buy."""
     return sell_price - buy_price
 
 
 def put_pnl(sell_price: float, buy_price: float) -> float:
-    """Open short ES then close it. Profit = sell − buy."""
+    """Open short ES then close it. Profit = sell - buy."""
     return sell_price - buy_price
 
 
@@ -206,12 +210,21 @@ def score_events(
 
 def equity_stats(
     close: np.ndarray,
+    high: np.ndarray,
+    low: np.ndarray,
     buy_idx: np.ndarray,
     sell_idx: np.ndarray,
     flatten_idx: np.ndarray | None = None,
 ) -> dict:
-    """Mark-to-market Total %, win rate, max drawdown/runup, mean trade %."""
+    """Mark-to-market Total %, win rate, max drawdown/runup, per-trade runup.
+
+    ``max_runup_pct`` and ``avg_max_runup_pct`` are per-trade favourable-excursion
+    metrics (matching the frontend worker): the max and mean of each trade's
+    best intra-trade return, requiring high/low series.
+    """
     close = np.asarray(close, dtype=np.float64)
+    high = np.asarray(high, dtype=np.float64)
+    low = np.asarray(low, dtype=np.float64)
     n = close.size
     is_buy = np.zeros(n, dtype=np.uint8)
     is_sell = np.zeros(n, dtype=np.uint8)
@@ -240,20 +253,38 @@ def equity_stats(
     trough = 0.0
     max_drawdown_pct = 0.0
     max_runup_pct = 0.0
+    trade_runup = 0.0
+    max_trade_runup = 0.0
+    total_trade_runup = 0.0
     for i in range(n):
         price = float(close[i])
+        hi = float(high[i])
+        lo = float(low[i])
+        # Per-trade favourable excursion before any open/close on this bar.
+        if side == 1 and entry != 0.0:
+            trade_runup = max(trade_runup, (hi - entry) / entry * 100.0)
+        elif side == -1 and entry != 0.0:
+            trade_runup = max(trade_runup, (entry - lo) / entry * 100.0)
         if is_flat[i]:
             if side == 1:
                 _pnl, pct, won = _close_call(entry, price)
                 call_pct_sum += pct
                 close_calls += 1
                 wins += int(won)
+                if trade_runup > max_trade_runup:
+                    max_trade_runup = trade_runup
+                total_trade_runup += trade_runup
+                trade_runup = 0.0
                 side = 0
             elif side == -1:
                 _pnl, pct, won = _close_put(entry, price)
                 put_pct_sum += pct
                 close_puts += 1
                 wins += int(won)
+                if trade_runup > max_trade_runup:
+                    max_trade_runup = trade_runup
+                total_trade_runup += trade_runup
+                trade_runup = 0.0
                 side = 0
         elif is_buy[i]:
             if side == -1:
@@ -261,20 +292,36 @@ def equity_stats(
                 put_pct_sum += pct
                 close_puts += 1
                 wins += int(won)
+                if trade_runup > max_trade_runup:
+                    max_trade_runup = trade_runup
+                total_trade_runup += trade_runup
+                trade_runup = 0.0
                 side = 0
             if side == 0:
                 entry = price
                 side = 1
+                trade_runup = (
+                    max(0.0, (hi - price) / price *
+                        100.0) if price != 0.0 else 0.0
+                )
         elif is_sell[i]:
             if side == 1:
                 _pnl, pct, won = _close_call(entry, price)
                 call_pct_sum += pct
                 close_calls += 1
                 wins += int(won)
+                if trade_runup > max_trade_runup:
+                    max_trade_runup = trade_runup
+                total_trade_runup += trade_runup
+                trade_runup = 0.0
                 side = 0
             if side == 0:
                 entry = price
                 side = -1
+                trade_runup = (
+                    max(0.0, (price - lo) / price *
+                        100.0) if price != 0.0 else 0.0
+                )
         equity = call_pct_sum + put_pct_sum
         if side == 1:
             equity += call_pct(entry, price)
@@ -292,12 +339,14 @@ def equity_stats(
             max_runup_pct = runup
     closed = close_calls + close_puts
     profit_pct = call_pct_sum + put_pct_sum
+    avg_max_runup = total_trade_runup / closed if closed else 0.0
     return {
         "profit_pct": profit_pct,
         "win_rate": (wins / closed) * 100.0 if closed else 0.0,
         "max_drawdown_pct": max_drawdown_pct,
         "max_runup_pct": max_runup_pct,
         "average_profit_pct": profit_pct / closed if closed else 0.0,
+        "avg_max_runup_pct": avg_max_runup,
         "closed": closed,
         "wins": wins,
     }
@@ -319,13 +368,15 @@ try:  # pragma: no cover - runtime optional
             flatten,
         )
 
-    def _equity_stats_wrapper(close, buy_idx, sell_idx, flatten_idx=None):
+    def _equity_stats_wrapper(close, high, low, buy_idx, sell_idx, flatten_idx=None):
         if flatten_idx is None:
             flatten = np.empty(0, dtype=np.int64)
         else:
             flatten = np.asarray(flatten_idx, dtype=np.int64)
         out = equity_stats_nb(
             np.asarray(close, dtype=np.float64),
+            np.asarray(high, dtype=np.float64),
+            np.asarray(low, dtype=np.float64),
             np.asarray(buy_idx, dtype=np.int64),
             np.asarray(sell_idx, dtype=np.int64),
             flatten,
@@ -336,8 +387,9 @@ try:  # pragma: no cover - runtime optional
             "max_drawdown_pct": float(out[2]),
             "max_runup_pct": float(out[3]),
             "average_profit_pct": float(out[4]),
-            "closed": int(out[5]),
-            "wins": int(out[6]),
+            "avg_max_runup_pct": float(out[5]),
+            "closed": int(out[6]),
+            "wins": int(out[7]),
         }
 
     score_events = _score_events_wrapper
@@ -345,6 +397,18 @@ try:  # pragma: no cover - runtime optional
 except Exception:
     # Numba not available or failed to build — continue without acceleration.
     pass
+
+
+@dataclass
+class FrameSeries:
+    close: np.ndarray
+    high: np.ndarray
+    low: np.ndarray
+    ema: np.ndarray
+    sma: np.ndarray
+    rth: np.ndarray
+    session_open: np.ndarray
+    session_close: np.ndarray
 
 
 def trial_equity_stats(series: FrameSeries, trial: Trial) -> dict:
@@ -360,7 +424,7 @@ def trial_equity_stats(series: FrameSeries, trial: Trial) -> dict:
     buy_idx, sell_idx, flatten_idx = rth_trade_indices(
         fast, slow, series.rth, series.session_open, series.session_close
     )
-    return equity_stats(series.close, buy_idx, sell_idx, flatten_idx)
+    return equity_stats(series.close, series.high, series.low, buy_idx, sell_idx, flatten_idx)
 
 
 def params_equity_stats(
@@ -392,6 +456,8 @@ def params_equity_stats(
         call_win_rate=0.0,
         put_win_rate=0.0,
         bars=int(series.close.size),
+        max_runup_pct=0.0,
+        avg_max_runup_pct=0.0,
     )
     return trial_equity_stats(series, dummy)
 
@@ -410,7 +476,20 @@ def _metric_value(trial: Trial, metric: str) -> tuple[float, float, int]:
         return profit_pct, win_rate, trial.closed
     if metric == "call_profit_pct":
         return round(trial.call_profit_pct, 4), win_rate, trial.close_calls
-    return round(trial.put_profit_pct, 4), win_rate, trial.close_puts
+    if metric == "put_profit_pct":
+        return round(trial.put_profit_pct, 4), win_rate, trial.close_puts
+    if metric == "max_runup_pct":
+        return (
+            round(trial.max_runup_pct, 4),
+            profit_pct,
+            trial.closed,
+        )
+    # avg_max_runup_pct
+    return (
+        round(trial.avg_max_runup_pct, 4),
+        profit_pct,
+        trial.closed,
+    )
 
 
 def _enough_trades(metric: str, close_calls: int, close_puts: int, closed: int) -> bool:
@@ -427,16 +506,6 @@ def _better(metric: str, cand: Trial, best: Trial | None) -> bool:
     return _metric_value(cand, metric) > _metric_value(best, metric)
 
 
-@dataclass
-class FrameSeries:
-    close: np.ndarray
-    ema: np.ndarray
-    sma: np.ndarray
-    rth: np.ndarray
-    session_open: np.ndarray
-    session_close: np.ndarray
-
-
 ProgressFn = Callable[[dict], None]
 
 
@@ -449,9 +518,11 @@ def _is_valid_config(length: int, sigma: float, n: int) -> bool:
 
 
 def _pair_count(n: int) -> int:
-    configs = [(length, sigma)
-               for length, sigma in product(LENGTHS, SIGMAS)
-               if _is_valid_config(length, sigma, n)]
+    configs = [
+        (length, sigma)
+        for length, sigma in product(LENGTHS, SIGMAS)
+        if _is_valid_config(length, sigma, n)
+    ]
     return sum(
         1
         for (flen, fsig), (slen, ssig) in product(configs, configs)
@@ -465,9 +536,11 @@ def _emit(on_progress: ProgressFn | None, payload: dict) -> None:
 
 
 def _gma_jobs(n: int) -> list[tuple[int, float]]:
-    return [(length, sigma)
-            for length, sigma in product(LENGTHS, SIGMAS)
-            if _is_valid_config(length, sigma, n)]
+    return [
+        (length, sigma)
+        for length, sigma in product(LENGTHS, SIGMAS)
+        if _is_valid_config(length, sigma, n)
+    ]
 
 
 def _gma_configs(
@@ -477,29 +550,46 @@ def _gma_configs(
     if not jobs:
         return []
     if workers <= 1:
-        return [(length, sigma, gaussian_ma(source, length, sigma)) for length, sigma in jobs]
+        return [
+            (length, sigma, gaussian_ma(source, length, sigma))
+            for length, sigma in jobs
+        ]
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = [pool.submit(gaussian_ma, source, length, sigma)
-                for length, sigma in jobs]
-        return [(length, sigma, fut.result()) for (length, sigma), fut in zip(jobs, futs)]
+        futs = [
+            pool.submit(gaussian_ma, source, length, sigma)
+            for length, sigma in jobs
+        ]
+        return [
+            (length, sigma, fut.result())
+            for (length, sigma), fut in zip(jobs, futs)
+        ]
 
 
 def _precompute_gmas(
     ema: np.ndarray, sma: np.ndarray, n: int, workers: int
-) -> tuple[list[tuple[int, float, np.ndarray]], list[tuple[int, float, np.ndarray]]]:
+) -> tuple[
+    list[tuple[int, float, np.ndarray]],
+    list[tuple[int, float, np.ndarray]],
+]:
     """Compute every GMA once per timeframe from the same EMA(3) / SMA(3)."""
     jobs = _gma_jobs(n)
     if workers <= 1:
         return _gma_configs(ema, jobs, 1), _gma_configs(sma, jobs, 1)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        fast_futs = [(length, sigma, pool.submit(
-            gaussian_ma, ema, length, sigma)) for length, sigma in jobs]
-        slow_futs = [(length, sigma, pool.submit(
-            gaussian_ma, sma, length, sigma)) for length, sigma in jobs]
-        fast = [(length, sigma, fut.result())
-                for length, sigma, fut in fast_futs]
-        slow = [(length, sigma, fut.result())
-                for length, sigma, fut in slow_futs]
+        fast_futs = [
+            (length, sigma, pool.submit(gaussian_ma, ema, length, sigma))
+            for length, sigma in jobs
+        ]
+        slow_futs = [
+            (length, sigma, pool.submit(gaussian_ma, sma, length, sigma))
+            for length, sigma in jobs
+        ]
+        fast = [
+            (length, sigma, fut.result()) for length, sigma, fut in fast_futs
+        ]
+        slow = [
+            (length, sigma, fut.result()) for length, sigma, fut in slow_futs
+        ]
     return fast, slow
 
 
@@ -593,6 +683,8 @@ _SEARCH_STATE: dict = {}
 def _init_search_worker(
     timeframe: str,
     close: np.ndarray,
+    high: np.ndarray,
+    low: np.ndarray,
     rth: np.ndarray,
     session_open: np.ndarray,
     session_close: np.ndarray,
@@ -604,12 +696,17 @@ def _init_search_worker(
     tick_value=None,
     tick_lock=None,
 ) -> None:
-    ticks = _SharedTicks(
-        tick_value, tick_lock) if tick_value is not None else None
+    ticks = (
+        _SharedTicks(tick_value, tick_lock)
+        if tick_value is not None
+        else None
+    )
     _SEARCH_STATE.clear()
     _SEARCH_STATE.update(
         timeframe=timeframe,
         close=close,
+        high=high,
+        low=low,
         rth=rth,
         session_open=session_open,
         session_close=session_close,
@@ -622,11 +719,15 @@ def _init_search_worker(
     )
 
 
-def _search_job(fast_jobs: list[tuple[int, float]]) -> tuple[Trial | None, int, np.ndarray]:
+def _search_job(
+    fast_jobs: list[tuple[int, float]],
+) -> tuple[Trial | None, int, np.ndarray]:
     state = _SEARCH_STATE
     return _search_from_sources(
         state["timeframe"],
         state["close"],
+        state["high"],
+        state["low"],
         state["rth"],
         state["session_open"],
         state["session_close"],
@@ -661,6 +762,8 @@ def _record_trial(
     n_puts: int,
     call_wins: int,
     put_wins: int,
+    max_runup_pct: float = 0.0,
+    avg_max_runup_pct: float = 0.0,
 ) -> Trial:
     return Trial(
         timeframe=timeframe,
@@ -684,6 +787,8 @@ def _record_trial(
         call_win_rate=(call_wins / n_calls) * 100.0 if n_calls else 0.0,
         put_win_rate=(put_wins / n_puts) * 100.0 if n_puts else 0.0,
         bars=n,
+        max_runup_pct=max_runup_pct,
+        avg_max_runup_pct=avg_max_runup_pct,
     )
 
 
@@ -711,6 +816,8 @@ def _score_pair(
 def _search_from_sources(
     timeframe: str,
     close: np.ndarray,
+    high: np.ndarray,
+    low: np.ndarray,
     rth: np.ndarray,
     session_open: np.ndarray,
     session_close: np.ndarray,
@@ -722,7 +829,7 @@ def _search_from_sources(
     slow_jobs: list[tuple[int, float]],
     ticks: _TickCounter | None,
 ) -> tuple[Trial | None, int, np.ndarray]:
-    """Reuse one EMA/SMA; compute each GMA(length, σ) as needed."""
+    """Reuse one EMA/SMA; compute each GMA(length, sigma) as needed."""
     fast_group = [
         (flen, fsig, gaussian_ma(ema, flen, fsig))
         for flen, fsig in fast_jobs
@@ -763,6 +870,9 @@ def _search_from_sources(
                 call_wins,
                 put_wins,
             ) = scored
+            trial_stats = equity_stats(
+                close, high, low, buy_idx, sell_idx, flatten_idx
+            )
             trial = _record_trial(
                 timeframe,
                 n,
@@ -780,8 +890,9 @@ def _search_from_sources(
                 n_puts,
                 call_wins,
                 put_wins,
+                trial_stats["max_runup_pct"],
+                trial_stats["avg_max_runup_pct"],
             )
-            trial_stats = equity_stats(close, buy_idx, sell_idx, flatten_idx)
             rows.append(
                 trial_row(
                     flen,
@@ -813,6 +924,8 @@ def _search_from_sources(
 def _search_fast_group(
     timeframe: str,
     close: np.ndarray,
+    high: np.ndarray,
+    low: np.ndarray,
     rth: np.ndarray,
     session_open: np.ndarray,
     session_close: np.ndarray,
@@ -879,6 +992,8 @@ def _search_fast_group(
                 100.0 if n_calls else 0.0,
                 put_win_rate=(put_wins / n_puts) * 100.0 if n_puts else 0.0,
                 bars=n,
+                max_runup_pct=0.0,
+                avg_max_runup_pct=0.0,
             )
             if _better(metric, trial, best):
                 best = trial
@@ -896,10 +1011,12 @@ def search_timeframe(
 ) -> tuple[Trial | None, int, np.ndarray]:
     """Search valid GMA pairs without materializing every GMA series at once.
 
-    Parent ships EMA(3)/SMA(3)/close/RTH masks. Each worker (or serial chunk)
-    builds its fast-GMA group from EMA, then one slow GMA at a time from SMA.
+    Parent ships EMA(3)/SMA(3)/close/high/low/RTH masks. Each worker (or serial
+    chunk) builds its fast-GMA group from EMA, then one slow GMA at a time from SMA.
     """
     close = series.close
+    high = series.high
+    low = series.low
     n = close.size
     jobs = _gma_jobs(n)
     if on_ready is not None:
@@ -913,7 +1030,9 @@ def search_timeframe(
     tested = 0
     trial_chunks: list[np.ndarray] = []
 
-    def collect(parts: list[tuple[Trial | None, int, np.ndarray]]) -> None:
+    def collect(
+        parts: list[tuple[Trial | None, int, np.ndarray]]
+    ) -> None:
         nonlocal best, tested
         for cand, count, rows in parts:
             tested += count
@@ -929,6 +1048,8 @@ def search_timeframe(
                 _search_from_sources(
                     timeframe,
                     close,
+                    high,
+                    low,
                     series.rth,
                     series.session_open,
                     series.session_close,
@@ -954,6 +1075,8 @@ def search_timeframe(
             initargs=(
                 timeframe,
                 close,
+                high,
+                low,
                 series.rth,
                 series.session_open,
                 series.session_close,
@@ -985,6 +1108,8 @@ def search_timeframe(
                     _search_from_sources,
                     timeframe,
                     close,
+                    high,
+                    low,
                     series.rth,
                     series.session_open,
                     series.session_close,
@@ -1010,12 +1135,16 @@ def optimize(
     load_series,
     on_progress: ProgressFn | None = None,
     timeframe: str | None = None,
+    timeframes: list[str] | None = None,
 ) -> dict:
     if metric not in METRICS:
         raise ValueError(f"metric must be one of {sorted(METRICS)}")
-    if not timeframe:
-        raise ValueError("timeframe is required")
-    specs = [timeframe]
+    if timeframes:
+        specs = list(timeframes)
+    elif timeframe:
+        specs = [timeframe]
+    else:
+        raise ValueError("timeframe or timeframes is required")
     started = time.perf_counter()
     jobs: list[tuple[str, FrameSeries, int]] = []
     for index, spec in enumerate(specs, start=1):
@@ -1037,7 +1166,7 @@ def optimize(
         packed = load_series(spec)
         if packed is None:
             continue
-        close, ema_source, sma_source, timestamps = packed
+        close, high, low, ema_source, sma_source, timestamps = packed
         if close is None or close.size < MIN_TRADES + 2:
             continue
         if ema_source is None or sma_source is None:
@@ -1051,6 +1180,8 @@ def optimize(
             rth, session_open, session_close = session_masks(timestamps)
         series = FrameSeries(
             close=close,
+            high=high,
+            low=low,
             ema=ema_source,
             sma=sma_source,
             rth=rth,
@@ -1058,16 +1189,19 @@ def optimize(
             session_close=session_close,
         )
         jobs.append((spec, series, _pair_count(int(close.size))))
-
     work_total = max(sum(pairs for _spec, _series, pairs in jobs), 1)
     work_done = 0
     overall: Trial | None = None
     tested = 0
     frames = 0
     trial_chunks: list[np.ndarray] = []
+    timeframe_results: list[dict] = []
 
     def report(spec: str, frame: int, frame_tested: int, message: str) -> None:
         done = min(work_done + frame_tested, work_total)
+
+
+
         elapsed = time.perf_counter() - started
         eta = None
         if done > 0 and elapsed > 0:
@@ -1107,11 +1241,30 @@ def optimize(
         if rows is not None and rows.size:
             trial_chunks.append(rows)
         report(spec, index, 0, f"Finished {spec}")
-        if best is not None and _better(metric, best, overall):
-            overall = best
+        if best is not None:
+            timeframe_results.append(
+                {
+                    "timeframe": spec,
+                    "params": {
+                        "fast_length": best.fast_length,
+                        "fast_sigma": best.fast_sigma,
+                        "slow_length": best.slow_length,
+                        "slow_sigma": best.slow_sigma,
+                    },
+                    "win_rate": round(best.win_rate, 2),
+                    "profit_pct": round(best.profit_pct, 4),
+                    "max_runup_pct": round(best.max_runup_pct, 4),
+                    "avg_max_runup_pct": round(best.avg_max_runup_pct, 4),
+                    "closed_trades": best.closed,
+                    "wins": best.wins,
+                }
+            )
+            if _better(metric, best, overall):
+                overall = best
     if overall is None:
         raise LookupError(
-            f"No combo produced {MIN_TRADES}+ closed trades for {symbol} {timeframe} ({metric})"
+            f"No combo produced {MIN_TRADES}+ closed trades for {symbol} "
+            f"{specs} ({metric})"
         )
     winning_series = next(
         series for spec, series, _pairs in jobs if spec == overall.timeframe
@@ -1156,6 +1309,7 @@ def optimize(
         "put_win_rate": round(overall.put_win_rate, 2),
         "max_drawdown_pct": round(equity["max_drawdown_pct"], 4),
         "max_runup_pct": round(equity["max_runup_pct"], 4),
+        "avg_max_runup_pct": round(equity["avg_max_runup_pct"], 4),
         "average_profit_pct": round(equity["average_profit_pct"], 4),
         "closed_trades": overall.closed,
         "close_calls": overall.close_calls,
@@ -1165,8 +1319,9 @@ def optimize(
         "wins": overall.wins,
         "bars": overall.bars,
         "tested": tested,
-        "aggregates": [overall.timeframe],
+        "aggregates": list(specs),
         "frames_searched": frames,
+        "per_timeframe": timeframe_results,
         "min_trades": MIN_TRADES,
         "grid": {"lengths": LENGTHS, "sigmas": SIGMAS},
         "viz": viz,

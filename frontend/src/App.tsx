@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Chart, { CHART_ZONES, formatChartTime, type ChartZone } from "./Chart";
-import { fetchCatalog, fetchMeta, fetchTimeframes, streamChart, watchUrl } from "./api";
-import { runFrontendOptimization } from "./gmaOptimizer";
-import { DEFAULT_PARAMS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_SIGMA_MAX, GMA_SIGMA_MIN, gmaScale, isValidGmaPair, OPTIMIZE_OPTIONS, type Bar, type GmaParams, type LoadProgress, type OptimizeMetric, type OptimizeProgress, type OptimizeResult } from "./types";
+import { fetchCatalog, fetchChart, fetchMeta, fetchTimeframes, streamChart, watchUrl } from "./api";
+import { runFrontendOptimization, runMultiTimeframeOptimization, type CrossTfProgress, type CrossTfResult } from "./gmaOptimizer";
+import { CROSS_TF_OPTIMIZE_OPTIONS, DEFAULT_PARAMS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_SIGMA_MAX, GMA_SIGMA_MIN, gmaScale, isValidGmaPair, OPTIMIZE_OPTIONS, type Bar, type GmaParams, type LoadProgress, type OptimizeMetric, type OptimizeProgress, type OptimizeResult } from "./types";
 
 import { computeTradeStats, formatActions, formatPct, formatPoints, formatWinRateLine, isUpAction, withActions } from "./tradeStats";
 
@@ -52,9 +52,15 @@ export default function App() {
   const [applyingGma, setApplyingGma] = useState(false);
   const [chartProgress, setChartProgress] = useState<LoadProgress | null>(null);
   const [optimizationFeature, setOptimizationFeature] = useState<OptimizeMetric>("total_profit_pct");
+  const [minTrades, setMinTrades] = useState(1);
+  const [maxTrades, setMaxTrades] = useState<number | null>(null);
   const [optimizationProgress, setOptimizationProgress] = useState<OptimizeProgress | null>(null);
   const [optimizationResult, setOptimizationResult] = useState<OptimizeResult | null>(null);
   const [optimizing, setOptimizing] = useState(false);
+  const [crossTfFeature, setCrossTfFeature] = useState<OptimizeMetric>("total_win_rate");
+  const [crossTfProgress, setCrossTfProgress] = useState<CrossTfProgress | null>(null);
+  const [crossTfResult, setCrossTfResult] = useState<CrossTfResult | null>(null);
+  const [crossTfOptimizing, setCrossTfOptimizing] = useState(false);
   const [gmaApplied, setGmaApplied] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const fingerprintRef = useRef("");
@@ -252,6 +258,8 @@ export default function App() {
         symbol,
         effectiveTf,
         optimizationFeature,
+        minTrades,
+        maxTrades,
         (progress) => setOptimizationProgress(progress),
       );
       setOptimizationResult(result);
@@ -270,6 +278,51 @@ export default function App() {
       fastSigma: optimizationResult.params.fast_sigma,
       slowLength: optimizationResult.params.slow_length,
       slowSigma: optimizationResult.params.slow_sigma,
+    };
+    setDraft(best);
+    setParams(best);
+    setGmaApplied(true);
+    setApplyingGma(true);
+    setStatus("loading");
+  };
+
+  const optimizeCrossTimeframes = async () => {
+    if (locked || !symbol || !timeframes.length || crossTfOptimizing) return;
+    setCrossTfOptimizing(true);
+    setCrossTfProgress(null);
+    setCrossTfResult(null);
+    setError(null);
+    try {
+      const series = await Promise.all(
+        timeframes.map(async (tf) => {
+          const data = await fetchChart(symbol, tf, dataSource);
+          return { timeframe: tf, bars: data.bars };
+        }),
+      );
+      const result = await runMultiTimeframeOptimization(
+        series,
+        symbol,
+        crossTfFeature,
+        minTrades,
+        maxTrades,
+        (progress) => setCrossTfProgress(progress),
+      );
+      setCrossTfResult(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCrossTfOptimizing(false);
+      setCrossTfProgress(null);
+    }
+  };
+
+  const applyCrossTfResult = () => {
+    if (!crossTfResult) return;
+    const best: GmaParams = {
+      fastLength: crossTfResult.params.fast_length,
+      fastSigma: crossTfResult.params.fast_sigma,
+      slowLength: crossTfResult.params.slow_length,
+      slowSigma: crossTfResult.params.slow_sigma,
     };
     setDraft(best);
     setParams(best);
@@ -490,6 +543,32 @@ export default function App() {
               ))}
             </select>
           </label>
+          <div className="trade-filter">
+            <label>
+              Min trades
+              <input
+                type="number"
+                min={1}
+                value={minTrades}
+                disabled={locked || busy || optimizing || !symbol || !effectiveTf}
+                onChange={(e) => setMinTrades(Math.max(1, Number(e.target.value) || 1))}
+              />
+            </label>
+            <label>
+              Max trades
+              <input
+                type="number"
+                min={1}
+                value={maxTrades ?? ""}
+                placeholder="None"
+                disabled={locked || busy || optimizing || !symbol || !effectiveTf}
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  setMaxTrades(raw === "" ? null : Math.max(1, Number(raw) || 1));
+                }}
+              />
+            </label>
+          </div>
           <button
             type="button"
             className="optimize"
@@ -567,9 +646,21 @@ export default function App() {
               </dd>
             </div>
             <div>
+              <dt>Avg max drawdown %</dt>
+              <dd className={tradeStats.avgMaxDrawdownPct < 0 ? "sell" : ""}>
+                {formatPct(tradeStats.avgMaxDrawdownPct)}
+              </dd>
+            </div>
+            <div>
               <dt>Max runup %</dt>
               <dd className={tradeStats.maxRunupPct > 0 ? "buy" : ""}>
                 {formatPct(tradeStats.maxRunupPct)}
+              </dd>
+            </div>
+            <div>
+              <dt>Avg max runup %</dt>
+              <dd className={tradeStats.avgMaxRunupPct > 0 ? "buy" : ""}>
+                {formatPct(tradeStats.avgMaxRunupPct)}
               </dd>
             </div>
             <div className="group-start">
@@ -624,6 +715,94 @@ export default function App() {
 
       <main className="stage">
         {error && <div className="banner">{error}</div>}
+        <section className="cross-tf-bar">
+          <span className="cross-tf-title">Cross-Timeframe Optimize</span>
+          <label className="field">
+            <span>Feature</span>
+            <select
+              value={crossTfFeature}
+              disabled={locked || crossTfOptimizing || !symbol || !timeframes.length}
+              onChange={(event) => {
+                setCrossTfFeature(event.target.value as OptimizeMetric);
+                setCrossTfResult(null);
+              }}
+            >
+              {CROSS_TF_OPTIMIZE_OPTIONS.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field trade-filter-field">
+            <span>Min trades</span>
+            <input
+              type="number"
+              min={1}
+              value={minTrades}
+              disabled={locked || crossTfOptimizing || !symbol || !timeframes.length}
+              onChange={(e) => setMinTrades(Math.max(1, Number(e.target.value) || 1))}
+            />
+          </label>
+          <label className="field trade-filter-field">
+            <span>Max trades</span>
+            <input
+              type="number"
+              min={1}
+              value={maxTrades ?? ""}
+              placeholder="None"
+              disabled={locked || crossTfOptimizing || !symbol || !timeframes.length}
+              onChange={(e) => {
+                const raw = e.target.value;
+                setMaxTrades(raw === "" ? null : Math.max(1, Number(raw) || 1));
+              }}
+            />
+          </label>
+          <button
+            type="button"
+            className="optimize"
+            disabled={locked || !symbol || !timeframes.length || crossTfOptimizing || busy}
+            onClick={optimizeCrossTimeframes}
+          >
+            {crossTfOptimizing
+              ? crossTfProgress
+                ? `Optimizing ${Math.round(crossTfProgress.pct)}%`
+                : "Loading timeframes…"
+              : "Optimize All Timeframes"}
+          </button>
+          {crossTfProgress && (
+            <span className="cross-tf-status">
+              {crossTfProgress.timeframesDone.length > 0 &&
+                `Done: ${crossTfProgress.timeframesDone.join(", ")} · `}
+              {crossTfProgress.message}
+            </span>
+          )}
+          {crossTfResult && (
+            <div className="cross-tf-result">
+              <span>
+                Best <strong className="cross-tf-best-tf">{crossTfResult.timeframe}</strong> ·{" "}
+                {optimizationLabel(crossTfFeature)}
+              </span>
+              <strong>{optimizationScore(crossTfResult, crossTfFeature)}</strong>
+              <span>
+                Fast L {crossTfResult.params.fast_length} · σ{" "}
+                {crossTfResult.params.fast_sigma.toFixed(1)}
+              </span>
+              <span>
+                Slow L {crossTfResult.params.slow_length} · σ{" "}
+                {crossTfResult.params.slow_sigma.toFixed(1)}
+              </span>
+              <button
+                type="button"
+                className="optimize"
+                disabled={busy || optimizing || crossTfOptimizing}
+                onClick={applyCrossTfResult}
+              >
+                Apply
+              </button>
+            </div>
+          )}
+        </section>
         <div className="chart-panel">
           <Chart
             bars={labeledBars}

@@ -87,6 +87,17 @@ export const OPTIMIZE_OPTIONS: { id: OptimizeMetric; label: string }[] = [
   { id: "avg_max_runup_pct", label: "Maximize average max run-up %" },
 ];
 
+/** Metrics offered by the cross-timeframe optimizer in the header. */
+export const CROSS_TF_OPTIMIZE_OPTIONS: {
+  id: OptimizeMetric;
+  label: string;
+}[] = [
+  { id: "total_win_rate", label: "Win rate" },
+  { id: "total_profit_pct", label: "Total profit %" },
+  { id: "avg_max_runup_pct", label: "Avg max run-up %" },
+  { id: "max_runup_pct", label: "Max run-up %" },
+];
+
 export interface OptimizeProgress {
   type: "progress";
   pct: number;

@@ -19,6 +19,8 @@ METRIC_FIELDS = (
     "put_win_rate",
     "call_profit_pct",
     "put_profit_pct",
+    "max_runup_pct",
+    "avg_max_runup_pct",
     "closed",
 )
 PARAM_PAIRS = (
@@ -36,6 +38,8 @@ METRIC_DIGITS = {
     "profit_pct": 4,
     "call_profit_pct": 4,
     "put_profit_pct": 4,
+    "max_runup_pct": 4,
+    "avg_max_runup_pct": 4,
     "closed": 0,
 }
 SEARCH_METRIC_FIELD = {
@@ -45,7 +49,10 @@ SEARCH_METRIC_FIELD = {
     "total_profit_pct": "profit_pct",
     "call_profit_pct": "call_profit_pct",
     "put_profit_pct": "put_profit_pct",
+    "max_runup_pct": "max_runup_pct",
+    "avg_max_runup_pct": "avg_max_runup_pct",
 }
+
 TOP_N = 40
 
 TRIAL_DTYPE = np.dtype(
@@ -66,6 +73,7 @@ TRIAL_DTYPE = np.dtype(
         ("close_puts", np.int32),
         ("max_drawdown_pct", np.float32),
         ("max_runup_pct", np.float32),
+        ("avg_max_runup_pct", np.float32),
         ("average_profit_pct", np.float32),
     ]
 )
@@ -92,6 +100,7 @@ def trial_row(
     close_puts: int,
     max_drawdown_pct: float,
     max_runup_pct: float,
+    avg_max_runup_pct: float,
     average_profit_pct: float,
 ) -> tuple:
     return (
@@ -111,6 +120,7 @@ def trial_row(
         int(close_puts),
         float(max_drawdown_pct),
         float(max_runup_pct),
+        float(avg_max_runup_pct),
         float(average_profit_pct),
     )
 
@@ -291,6 +301,7 @@ def _top_trials(trials: np.ndarray, metric: str) -> list[dict]:
                 "close_puts": int(row["close_puts"]),
                 "max_drawdown_pct": round(float(row["max_drawdown_pct"]), 4),
                 "max_runup_pct": round(float(row["max_runup_pct"]), 4),
+                "avg_max_runup_pct": round(float(row["avg_max_runup_pct"]), 4),
                 "average_profit_pct": round(float(row["average_profit_pct"]), 4),
             }
         )
@@ -321,6 +332,7 @@ def trials_to_list(trials: np.ndarray) -> list[dict]:
                 "close_puts": int(row["close_puts"]),
                 "max_drawdown_pct": round(float(row["max_drawdown_pct"]), 4),
                 "max_runup_pct": round(float(row["max_runup_pct"]), 4),
+                "avg_max_runup_pct": round(float(row["avg_max_runup_pct"]), 4),
                 "average_profit_pct": round(float(row["average_profit_pct"]), 4),
             }
         )
