@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Chart, { CHART_ZONES, formatChartTime, type ChartZone } from "./Chart";
-import { fetchCatalog, fetchMeta, streamChart, watchUrl } from "./api";
+import { fetchCatalog, fetchMeta, fetchTimeframes, streamChart, watchUrl } from "./api";
 import { runFrontendOptimization } from "./gmaOptimizer";
 import { DEFAULT_PARAMS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_SIGMA_MAX, GMA_SIGMA_MIN, gmaScale, isValidGmaPair, OPTIMIZE_OPTIONS, type Bar, type GmaParams, type LoadProgress, type OptimizeMetric, type OptimizeProgress, type OptimizeResult } from "./types";
 
@@ -36,9 +36,9 @@ function optimizationLabel(metric: OptimizeMetric): string {
 
 export default function App() {
   const [catalog, setCatalog] = useState<Record<string, string[]>>({});
+  const [timeframesBySymbol, setTimeframesBySymbol] = useState<Record<string, string[]>>({});
   const [symbol, setSymbol] = useState("");
   const [timeframe, setTimeframe] = useState("");
-  const [path, setPath] = useState("");
   const [source, setSource] = useState<"ohlcv" | "trades" | "continuous" | "">("");
   const [chartZone, setChartZone] = useState<ChartZone>("local");
   const [params, setParams] = useState<GmaParams>(DEFAULT_PARAMS);
@@ -64,7 +64,8 @@ export default function App() {
   const locked = false;
 
   const symbols = useMemo(() => Object.keys(catalog).sort(), [catalog]);
-  const timeframes = catalog[symbol] ?? [];
+  const timeframes = timeframesBySymbol[symbol] ?? [];
+  const timeframesLoading = Boolean(symbol) && !timeframesBySymbol[symbol];
   const effectiveTf = timeframe;
   const dataSource = "continuous" as const;
   const last = bars.at(-1) ?? null;
@@ -82,15 +83,39 @@ export default function App() {
     setCatalog(data.symbols);
     const nextSymbol =
       symbol && data.symbols[symbol] ? symbol : Object.keys(data.symbols).sort()[0] ?? "";
-    const nextFrames = data.symbols[nextSymbol] ?? [];
-    const keepTf = nextFrames.includes(timeframe);
     setSymbol(nextSymbol);
-    if (keepTf) {
-      setTimeframe(timeframe);
-    } else {
-      setTimeframe(nextFrames[0] ?? "");
+    // Timeframes resolve on demand below; clearing forces the default pick.
+    setTimeframe("");
+  }, [symbol]);
+
+  // Fetch timeframes for the selected symbol on demand; default to the first
+  // option so the chart loads immediately without preloading other series.
+  useEffect(() => {
+    if (!symbol) return;
+    const cached = timeframesBySymbol[symbol];
+    if (cached) {
+      setTimeframe((current) =>
+        current && cached.includes(current) ? current : cached[0] ?? ""
+      );
+      return;
     }
-  }, [symbol, timeframe]);
+    let cancelled = false;
+    fetchTimeframes(symbol)
+      .then((frames) => {
+        if (cancelled) return;
+        setTimeframesBySymbol((prev) => ({ ...prev, [symbol]: frames }));
+        setTimeframe((current) =>
+          current && frames.includes(current) ? current : frames[0] ?? ""
+        );
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [symbol, timeframesBySymbol]);
 
   const loadChart = useCallback(
     async (
@@ -116,7 +141,6 @@ export default function App() {
         setBars(data.bars);
         setUpdated(data.updated);
         setLoadedAt(data.loaded_at);
-        setPath(data.path);
         setSource(data.source);
         setStatus("live");
         setError(null);
@@ -267,6 +291,7 @@ export default function App() {
             value={symbol}
             onChange={(e) => {
               setSymbol(e.target.value);
+              setTimeframe("");
               resetSeriesControls();
             }}
             disabled={locked || !symbols.length}
@@ -287,14 +312,22 @@ export default function App() {
               setTimeframe(e.target.value);
               resetSeriesControls();
             }}
-            disabled={locked || !timeframes.length}
+            disabled={locked || timeframesLoading || !timeframes.length}
           >
-            <option value="">Select timeframe</option>
-            {timeframes.map((item) => (
-              <option key={item} value={item}>
-                {item}
-              </option>
-            ))}
+            {timeframesLoading ? (
+              <option value="">Loading timeframes…</option>
+            ) : timeframes.length === 0 ? (
+              <option value="">No timeframes</option>
+            ) : (
+              <>
+                <option value="">Select timeframe</option>
+                {timeframes.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </>
+            )}
           </select>
         </label>
         <button
@@ -609,7 +642,6 @@ export default function App() {
       </main>
 
       <footer className="status">
-        <span>gs://live-trading-bot/{path || `${symbol || "—"}/${effectiveTf || "—"}`}</span>
         <span>
           {source === "continuous" ? "Continuous timeframe CSV" : ""}
         </span>

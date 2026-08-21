@@ -21,10 +21,8 @@ from backend.gcs import (
     has_ohlcv,
     list_symbols,
     list_timeframes,
-    list_continuous_timeframes,
-    list_trade_symbols,
 )
-from backend.aggregate import PRESETS, parse_spec
+from backend.aggregate import parse_spec
 from backend.gma import EMA_COL, SMA_COL, dual_gma
 from backend.optimize import optimize as run_optimize
 from backend.session import rth_trade_indices, session_masks
@@ -262,34 +260,20 @@ def health() -> dict:
 
 @app.get("/api/catalog")
 def catalog() -> dict:
+    """Lightweight symbol catalog for fast first paint.
+
+    Per-symbol timeframes are intentionally excluded so the UI renders quickly
+    on slow connections; clients fetch them on demand via /api/timeframes.
+    """
     try:
         symbols = list_symbols()
-        trade_names = list_trade_symbols()
     except Exception as exc:
         raise HTTPException(
             status_code=502, detail=f"Failed to list symbols: {exc}") from exc
-    trade_lower = {name.lower() for name in trade_names}
-    ohlcv: dict[str, list[str]] = {}
-    continuous: dict[str, list[str]] = {}
-    dropdown: dict[str, list[str]] = {}
-    has_trades: dict[str, bool] = {}
-    for symbol in symbols:
-        try:
-            existing = list_timeframes(symbol)
-        except Exception:
-            existing = []
-        ohlcv[symbol] = existing
-        continuous[symbol] = list_continuous_timeframes(symbol)
-        dropdown[symbol] = existing
-        has_trades[symbol] = symbol.lower() in trade_lower
     return {
         "bucket": "live-trading-bot",
         "prefix": "ohlcv",
-        "symbols": dropdown,
-        "ohlcv_timeframes": ohlcv,
-        "continuous_timeframes": continuous,
-        "has_trades": has_trades,
-        "aggregates": PRESETS,
+        "symbols": {symbol: [] for symbol in symbols},
     }
 
 
