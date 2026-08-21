@@ -491,7 +491,8 @@ async def events(
             else:
                 payload = {"type": "ping", "fingerprint": fp}
             yield f"data: {json.dumps(payload)}\n\n"
-            await asyncio.sleep(3)
+            # Near-real-time data is not required; keep GCS listing load low.
+            await asyncio.sleep(30)
 
     return StreamingResponse(
         generate(),

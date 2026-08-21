@@ -17,6 +17,7 @@ from typing import Callable
 from backend.aggregate import aggregate_trades, attach_source_mas
 import pandas as pd
 import pyarrow.parquet as pq
+from google.api_core.exceptions import NotFound
 from google.cloud import storage
 
 ProgressFn = Callable[[dict], None]
@@ -226,6 +227,7 @@ def load_continuous(
     symbol: str,
     timeframe: str,
     on_file: Callable[[int, int, str], None] | None = None,
+    on_bytes: Callable[[int, int, str], None] | None = None,
 ) -> tuple[pd.DataFrame, str, datetime | None]:
     objects = list_continuous_objects(symbol, timeframe)
     if not objects:
@@ -236,7 +238,15 @@ def load_continuous(
     obj = objects[0]
     if on_file is not None:
         on_file(0, 1, obj.name)
-    frame = pd.read_csv(io.BytesIO(bucket.blob(obj.name).download_as_bytes()))
+    total = max(int(obj.size or 0), 0)
+    raw = _chunked_download(
+        bucket.blob(obj.name),
+        on_delta=(lambda done: on_bytes(done, total, obj.name))
+        if on_bytes is not None
+        else None,
+        refresh_blob=lambda: bucket.blob(obj.name),
+    )
+    frame = pd.read_csv(io.BytesIO(raw))
     frame = _normalize_continuous_csv(frame, obj.name)
     if on_file is not None:
         on_file(1, 1, obj.name)
@@ -301,8 +311,56 @@ class ProgressClock:
         self.on_progress(payload)
 
 
-def _download_parquet(blob: storage.Blob) -> pd.DataFrame:
-    raw = blob.download_as_bytes()
+_DOWNLOAD_CHUNK = 1 << 20  # 1 MiB
+
+
+def _fmt_bytes(n: int | float) -> str:
+    value = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024:
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} TB"
+
+
+def _chunked_download(
+    blob: storage.Blob,
+    on_delta: Callable[[int], None] | None = None,
+    chunk_size: int = _DOWNLOAD_CHUNK,
+    refresh_blob: Callable[[], storage.Blob] | None = None,
+    attempts: int = 3,
+) -> bytes:
+    """Stream a blob in chunks, reporting cumulative bytes via ``on_delta``.
+
+    The storage client pins the object generation on the first chunk, so if
+    the pipeline replaces the object mid-transfer the remaining chunks 404.
+    In that case the whole transfer restarts against a fresh handle, yielding
+    a consistent snapshot of whichever generation is current.
+    """
+    for attempt in range(attempts):
+        buffer = bytearray()
+        try:
+            with blob.open("rb", chunk_size=chunk_size) as reader:
+                while True:
+                    chunk = reader.read(chunk_size)
+                    if not chunk:
+                        return bytes(buffer)
+                    buffer += chunk
+                    if on_delta is not None:
+                        on_delta(len(buffer))
+        except NotFound:
+            if refresh_blob is None or attempt + 1 >= attempts:
+                raise
+            blob = refresh_blob()
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
+def _download_parquet(
+    blob: storage.Blob,
+    on_delta: Callable[[int], None] | None = None,
+    refresh_blob: Callable[[], storage.Blob] | None = None,
+) -> pd.DataFrame:
+    raw = _chunked_download(blob, on_delta=on_delta, refresh_blob=refresh_blob)
     table = pq.read_table(io.BytesIO(raw))
     frame = table.to_pandas()
     frame.attrs["gcs_name"] = blob.name
@@ -313,9 +371,67 @@ def _file_label(name: str) -> str:
     return name.rsplit("/", 1)[-1]
 
 
+def _download_callbacks(
+    progress: ProgressClock | None,
+    lo: float,
+    span: float,
+    prefix: str = "",
+) -> tuple[
+    Callable[[int, int, str], None] | None,
+    Callable[[int, int, str], None] | None,
+]:
+    """Build download-stage callbacks mapped onto the [lo, lo + span] % band.
+
+    ``on_bytes(done, total, name)`` receives cumulative downloaded bytes and
+    drives the percentage so it tracks real transfer volume. ``on_file`` fires
+    once per completed file; it refreshes the status message but never moves
+    the percentage backwards. Non-final emits are throttled to ~5/s.
+    """
+    if progress is None:
+        return None, None
+    floor = {"pct": lo}
+    last = {"t": 0.0}
+
+    def on_file(done: int, total: int, name: str) -> None:
+        now = time.perf_counter()
+        if done < total and now - last["t"] < 0.2:
+            return
+        last["t"] = now
+        progress.emit(
+            floor["pct"],
+            f"{prefix}{_file_label(name)} ({done}/{total})",
+            stage="download",
+            done=done,
+            total=total,
+        )
+
+    def on_bytes(done: int, total: int, name: str) -> None:
+        # The pipeline can append rows between listing and download, so the
+        # transferred size may exceed the stale listed size; clamp for display.
+        if total > 0:
+            done = min(done, total)
+        pct = lo + span * done / max(total, 1)
+        if pct > floor["pct"]:
+            floor["pct"] = pct
+        now = time.perf_counter()
+        if done < total and now - last["t"] < 0.2:
+            return
+        last["t"] = now
+        progress.emit(
+            floor["pct"],
+            f"{prefix}{_file_label(name)} · {_fmt_bytes(done)} / {_fmt_bytes(total)}",
+            stage="download",
+            done=done,
+            total=total,
+        )
+
+    return on_file, on_bytes
+
+
 def _concat_parquets(
     objects: list[ObjectMeta],
     on_file: Callable[[int, int, str], None] | None = None,
+    on_bytes: Callable[[int, int, str], None] | None = None,
 ) -> tuple[pd.DataFrame, str, datetime | None]:
     if not objects:
         empty = pd.DataFrame()
@@ -323,12 +439,35 @@ def _concat_parquets(
     bucket = _client().bucket(BUCKET_NAME)
     blobs = [bucket.blob(item.name) for item in objects]
     frames: list[pd.DataFrame | None] = [None] * len(blobs)
+    total_bytes = sum(max(int(item.size or 0), 0) for item in objects)
+    progress_by_index = [0] * len(objects)
+    lock = Lock()
+
+    def download(index: int) -> None:
+        meta = objects[index]
+
+        def on_delta(cumulative: int) -> None:
+            if on_bytes is None:
+                return
+            with lock:
+                # Absolute per-file progress: a mid-stream retry resets the
+                # file's counter, and the sum must reflect that.
+                progress_by_index[index] = cumulative
+                overall = sum(progress_by_index)
+            on_bytes(overall, total_bytes, meta.name)
+
+        frames[index] = _download_parquet(
+            blobs[index],
+            on_delta=on_delta,
+            refresh_blob=lambda: bucket.blob(meta.name),
+        )
+
     with ThreadPoolExecutor(max_workers=min(8, len(blobs))) as pool:
-        futures = {pool.submit(_download_parquet, blob): i for i, blob in enumerate(blobs)}
+        futures = {pool.submit(download, i): i for i in range(len(blobs))}
         finished = 0
         for fut in as_completed(futures):
             idx = futures[fut]
-            frames[idx] = fut.result()
+            fut.result()
             finished += 1
             if on_file is not None:
                 on_file(finished, len(blobs), objects[idx].name)
@@ -345,13 +484,16 @@ def load_ohlcv(
     symbol: str,
     timeframe: str,
     on_file: Callable[[int, int, str], None] | None = None,
+    on_bytes: Callable[[int, int, str], None] | None = None,
 ) -> tuple[pd.DataFrame, str, datetime | None]:
     objects = list_parquet_objects(symbol, timeframe)
     if not objects:
         empty = pd.DataFrame(
             columns=["timestamp", "open", "high", "low", "close", "volume"])
         return empty, "", None
-    data, fp, latest = _concat_parquets(objects, on_file=on_file)
+    data, fp, latest = _concat_parquets(
+        objects, on_file=on_file, on_bytes=on_bytes
+    )
     if "timestamp" not in data.columns:
         raise ValueError("parquet files must include a timestamp column")
     data["timestamp"] = pd.to_datetime(data["timestamp"], utc=True)
@@ -364,12 +506,15 @@ def load_ohlcv(
 def load_trades(
     symbol: str,
     on_file: Callable[[int, int, str], None] | None = None,
+    on_bytes: Callable[[int, int, str], None] | None = None,
 ) -> tuple[pd.DataFrame, str, datetime | None]:
     objects = list_trade_objects(symbol)
     if not objects:
         empty = pd.DataFrame(columns=["timestamp", "price", "size"])
         return empty, "", None
-    data, fp, latest = _concat_parquets(objects, on_file=on_file)
+    data, fp, latest = _concat_parquets(
+        objects, on_file=on_file, on_bytes=on_bytes
+    )
     return data, fp, latest
 
 
@@ -450,16 +595,9 @@ class OhlcvStore:
         if progress is not None:
             progress.emit(
                 5, f"Reading continuous_data/{timeframe}", stage="lookup")
+        on_file, on_bytes = _download_callbacks(progress, 8.0, 65.0)
         frame, fp, updated = load_continuous(
-            symbol, timeframe,
-            on_file=(
-                lambda done, total, name: progress.emit(
-                    8 + 65 * done / max(total, 1),
-                    f"Downloading {_file_label(name)} ({done}/{total})",
-                    stage="download", done=done, total=total,
-                )
-                if progress is not None else None
-            ),
+            symbol, timeframe, on_file=on_file, on_bytes=on_bytes
         )
         if frame.empty:
             raise FileNotFoundError(
@@ -495,22 +633,13 @@ class OhlcvStore:
                     75, f"Using cached {timeframe}", stage="cache", done=1, total=1)
             return cached
 
-        def on_file(done: int, total: int, name: str) -> None:
-            if progress is None:
-                return
-            pct = 8 + 62 * done / max(total, 1)
-            progress.emit(
-                pct,
-                f"Downloading {_file_label(name)} ({done}/{total})",
-                stage="download",
-                done=done,
-                total=total,
-            )
-
+        on_file, on_bytes = _download_callbacks(progress, 8.0, 62.0)
         if progress is not None:
             progress.emit(
                 5, f"Listing ohlcv for {symbol}/{timeframe}", stage="lookup")
-        frame, fp, updated = load_ohlcv(symbol, timeframe, on_file=on_file)
+        frame, fp, updated = load_ohlcv(
+            symbol, timeframe, on_file=on_file, on_bytes=on_bytes
+        )
         if progress is not None:
             progress.emit(78, f"Loaded {len(frame):,} bars", stage="prepare")
         frame = attach_source_mas(frame)
@@ -544,21 +673,14 @@ class OhlcvStore:
                 )
             return cached
 
-        def on_file(done: int, total: int, name: str) -> None:
-            if progress is None:
-                return
-            pct = 8 + 38 * done / max(total, 1)
-            progress.emit(
-                pct,
-                f"Downloading trades {_file_label(name)} ({done}/{total})",
-                stage="download",
-                done=done,
-                total=total,
-            )
-
+        on_file, on_bytes = _download_callbacks(
+            progress, 8.0, 38.0, prefix="Downloading trades "
+        )
         if progress is not None:
             progress.emit(4, f"Listing trades for {symbol}", stage="lookup")
-        frame, fp, updated = load_trades(symbol, on_file=on_file)
+        frame, fp, updated = load_trades(
+            symbol, on_file=on_file, on_bytes=on_bytes
+        )
         resolved = _resolve_name(list_trade_symbols(), symbol) or symbol
         if progress is not None:
             progress.emit(48, f"Loaded {len(frame):,} trades", stage="prepare")

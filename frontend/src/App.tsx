@@ -216,7 +216,7 @@ export default function App() {
           }
         })
         .catch(() => undefined);
-    }, 8000);
+    }, 60000);
     return () => {
       sourceStream.close();
       window.clearInterval(poll);
