@@ -44,9 +44,9 @@ DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 
 class GmaParams(BaseModel):
-    fast_length: int = Field(20, ge=5, le=100)
+    fast_length: int = Field(20, ge=1, le=100)
     fast_sigma: float = Field(3.0, ge=1, le=10)
-    slow_length: int = Field(50, ge=5, le=100)
+    slow_length: int = Field(50, ge=1, le=100)
     slow_sigma: float = Field(3.0, ge=1, le=10)
 
 
@@ -324,9 +324,9 @@ async def chart(
     timeframe: str = Query(..., min_length=1),
     refresh: bool = False,
     source: DataSource | None = None,
-    fast_length: int = Query(20, ge=5, le=100),
+    fast_length: int = Query(20, ge=1, le=100),
     fast_sigma: float = Query(3.0, ge=1, le=10),
-    slow_length: int = Query(50, ge=5, le=100),
+    slow_length: int = Query(50, ge=1, le=100),
     slow_sigma: float = Query(3.0, ge=1, le=10),
 ):
     params = GmaParams(
@@ -354,9 +354,9 @@ def refresh(
     symbol: str = Query(..., min_length=1),
     timeframe: str = Query(..., min_length=1),
     source: DataSource | None = None,
-    fast_length: int = Query(20, ge=5, le=100),
+    fast_length: int = Query(20, ge=1, le=100),
     fast_sigma: float = Query(3.0, ge=1, le=10),
-    slow_length: int = Query(50, ge=5, le=100),
+    slow_length: int = Query(50, ge=1, le=100),
     slow_sigma: float = Query(3.0, ge=1, le=10),
 ) -> dict:
     params = GmaParams(

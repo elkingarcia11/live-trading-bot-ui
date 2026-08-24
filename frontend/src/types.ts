@@ -50,7 +50,7 @@ export interface GmaParams {
   slowSigma: number;
 }
 
-export const GMA_LENGTH_MIN = 5;
+export const GMA_LENGTH_MIN = 1;
 export const GMA_LENGTH_MAX = 100;
 export const GMA_SIGMA_MIN = 1;
 export const GMA_SIGMA_MAX = 10;
