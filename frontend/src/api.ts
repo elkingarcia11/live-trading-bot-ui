@@ -28,7 +28,17 @@ async function readJson<T>(response: Response): Promise<T> {
     let detail = response.statusText;
     try {
       const body = await response.json();
-      detail = body.detail ?? JSON.stringify(body);
+      if (typeof body.detail === "string") {
+        detail = body.detail;
+      } else if (body.detail !== undefined) {
+        // FastAPI returns an array of validation errors for 422 responses;
+        // stringify it so the message renders (not "[object Object]").
+        detail = typeof body.detail === "string"
+          ? body.detail
+          : JSON.stringify(body.detail);
+      } else {
+        detail = JSON.stringify(body);
+      }
     } catch {
       detail = await response.text();
     }

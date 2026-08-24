@@ -66,6 +66,18 @@ export function isValidGmaPair(params: GmaParams): boolean {
   );
 }
 
+/** Clamp GMA params to the range the backend `/api/chart` accepts
+ *  (length 5–100, sigma 1–10) so applying optimizer results can never
+ *  trigger a 422 validation error. */
+export function clampGmaParams(params: GmaParams): GmaParams {
+  return {
+    fastLength: Math.min(GMA_LENGTH_MAX, Math.max(GMA_LENGTH_MIN, params.fastLength)),
+    fastSigma: Math.min(GMA_SIGMA_MAX, Math.max(GMA_SIGMA_MIN, params.fastSigma)),
+    slowLength: Math.min(GMA_LENGTH_MAX, Math.max(GMA_LENGTH_MIN, params.slowLength)),
+    slowSigma: Math.min(GMA_SIGMA_MAX, Math.max(GMA_SIGMA_MIN, params.slowSigma)),
+  };
+}
+
 export type OptimizeMetric =
   | "total_win_rate"
   | "call_win_rate"

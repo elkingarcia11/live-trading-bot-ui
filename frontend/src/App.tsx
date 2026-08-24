@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Chart, { CHART_ZONES, formatChartTime, type ChartZone } from "./Chart";
 import { fetchCatalog, fetchChart, fetchMeta, fetchTimeframes, streamChart, watchUrl } from "./api";
 import { runFrontendOptimization, runMultiTimeframeOptimization, type CrossTfProgress, type CrossTfResult } from "./gmaOptimizer";
-import { CROSS_TF_OPTIMIZE_OPTIONS, DEFAULT_PARAMS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_SIGMA_MAX, GMA_SIGMA_MIN, gmaScale, isValidGmaPair, OPTIMIZE_OPTIONS, type Bar, type GmaParams, type LoadProgress, type OptimizeMetric, type OptimizeProgress, type OptimizeResult } from "./types";
+import { CROSS_TF_OPTIMIZE_OPTIONS, DEFAULT_PARAMS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_SIGMA_MAX, GMA_SIGMA_MIN, clampGmaParams, gmaScale, isValidGmaPair, OPTIMIZE_OPTIONS, type Bar, type GmaParams, type LoadProgress, type OptimizeMetric, type OptimizeProgress, type OptimizeResult } from "./types";
 
 import { computeTradeStats, formatActions, formatPct, formatPoints, formatWinRateLine, isUpAction, withActions } from "./tradeStats";
 
@@ -273,12 +273,12 @@ export default function App() {
 
   const applyOptimizedGmas = () => {
     if (!optimizationResult) return;
-    const best: GmaParams = {
+    const best: GmaParams = clampGmaParams({
       fastLength: optimizationResult.params.fast_length,
       fastSigma: optimizationResult.params.fast_sigma,
       slowLength: optimizationResult.params.slow_length,
       slowSigma: optimizationResult.params.slow_sigma,
-    };
+    });
     setDraft(best);
     setParams(best);
     setGmaApplied(true);
@@ -318,12 +318,12 @@ export default function App() {
 
   const applyCrossTfResult = () => {
     if (!crossTfResult) return;
-    const best: GmaParams = {
+    const best: GmaParams = clampGmaParams({
       fastLength: crossTfResult.params.fast_length,
       fastSigma: crossTfResult.params.fast_sigma,
       slowLength: crossTfResult.params.slow_length,
       slowSigma: crossTfResult.params.slow_sigma,
-    };
+    });
     setDraft(best);
     setParams(best);
     setGmaApplied(true);
