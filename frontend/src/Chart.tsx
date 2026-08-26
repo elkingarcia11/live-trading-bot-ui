@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from "react";
 import {
   ColorType,
   CrosshairMode,
@@ -34,6 +34,12 @@ interface Props {
   /** Raised when the user clicks a bar while a selection mode is active.
    *  `index` is the bar index $t$, `time` its unix-second timestamp. */
   onSelectPoint?: (kind: "entry" | "exit", index: number, time: number) => void;
+}
+
+/** Imperative controls exposed to the parent via a ref. */
+export interface ChartHandle {
+  /** Scroll the chart to the latest (rightmost) bar. */
+  scrollToFront: () => void;
 }
 
 /** Return the index of the bar whose time is nearest to `target` (binary search). */
@@ -76,16 +82,19 @@ export function formatChartTime(unix: number, zone: ChartZone, withDate = false)
   return new Date(unix * 1000).toLocaleString("en-US", dateOpts(zone, withDate));
 }
 
-export default function Chart({
-  bars,
-  fitKey,
-  timeZone,
-  showIndicators,
-  selectionMode = "off",
-  entryPoints = [],
-  exitPoints = [],
-  onSelectPoint,
-}: Props) {
+const Chart = forwardRef<ChartHandle, Props>(function Chart(
+  {
+    bars,
+    fitKey,
+    timeZone,
+    showIndicators,
+    selectionMode = "off",
+    entryPoints = [],
+    exitPoints = [],
+    onSelectPoint,
+  }: Props,
+  ref,
+) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -95,6 +104,13 @@ export default function Chart({
   const fittedKeyRef = useRef("");
   const zoneRef = useRef(timeZone);
   zoneRef.current = timeZone;
+
+  // Expose an imperative way to jump back to the latest bar, invoked from the
+  // "go to front" button in the footer. Kept a stable callback via refs.
+  const scrollToFront = useCallback(() => {
+    chartRef.current?.timeScale().scrollToRealTime();
+  }, []);
+  useImperativeHandle(ref, () => ({ scrollToFront }), [scrollToFront]);
 
   // Keep the latest imperative-mode props in refs so the single click handler
   // subscribed at chart creation always reads current values without resubscribing.
@@ -322,13 +338,16 @@ export default function Chart({
       });
     });
     candleRef.current.setMarkers(markers);
+    // Fit the view when a brand-new series is loaded (symbol/timeframe change).
+    // On incremental live updates we deliberately do NOT scroll, so the user
+    // stays wherever they are on the chart.
     if (fittedKeyRef.current !== fitKey) {
       fittedKeyRef.current = fitKey;
       chartRef.current?.timeScale().fitContent();
-    } else {
-      chartRef.current?.timeScale().scrollToRealTime();
     }
   }, [bars, fitKey, showIndicators, entryPoints, exitPoints]);
 
   return <div className="chart-host" ref={hostRef} />;
-}
+});
+
+export default Chart;

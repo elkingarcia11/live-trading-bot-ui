@@ -680,6 +680,16 @@ input:disabled {
   font-variant-numeric: tabular-nums;
 }
 
+.chart-scroll-front {
+  margin-left: 8px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  line-height: 1;
+  font-size: 16px;
+  color: var(--muted);
+}
+
 .view-toggle {
   display: flex;
   border: 1px solid var(--line);

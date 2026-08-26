@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Chart, { CHART_ZONES, formatChartTime, type ChartZone } from "./Chart";
+import Chart, { CHART_ZONES, formatChartTime, type ChartHandle, type ChartZone } from "./Chart";
 import { fetchCatalog, fetchChart, fetchMeta, fetchTimeframes, streamChart, watchUrl } from "./api";
 import { runFrontendOptimization, runMultiTimeframeOptimization, type CrossTfProgress, type CrossTfResult, type LabelScoringOptions } from "./gmaOptimizer";
 import { CROSS_TF_OPTIMIZE_OPTIONS, DEFAULT_MANUAL_WINDOW, DEFAULT_PARAMS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_SIGMA_MAX, GMA_SIGMA_MIN, clampGmaParams, gmaScale, isValidGmaPair, OPTIMIZE_OPTIONS, type Bar, type GmaParams, type LoadProgress, type ManualEntryWindow, type ManualPoint, type ManualSelectionMode, type OptimizeMetric, type OptimizeProgress, type OptimizeResult } from "./types";
@@ -76,6 +76,7 @@ export default function App() {
   const fingerprintRef = useRef("");
   const paramsRef = useRef(params);
   const requestRef = useRef(0);
+  const chartHandleRef = useRef<ChartHandle | null>(null);
   paramsRef.current = params;
   const locked = false;
 
@@ -1061,6 +1062,7 @@ export default function App() {
         </section>
         <div className="chart-panel">
           <Chart
+            ref={chartHandleRef}
             bars={labeledBars}
             fitKey={`${symbol}|${effectiveTf}`}
             timeZone={chartZone}
@@ -1088,6 +1090,14 @@ export default function App() {
         <span>Cached {formatClock(loadedAt, chartZone)}</span>
         <span>
           Last bar {last ? formatChartTime(last.time, chartZone, true) : "—"} · UTC
+          <button
+            type="button"
+            className="chart-scroll-front"
+            title="Jump to latest bar"
+            onClick={() => chartHandleRef.current?.scrollToFront()}
+          >
+            ›
+          </button>
         </span>
       </footer>
     </div>
