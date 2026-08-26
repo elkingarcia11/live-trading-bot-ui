@@ -1,6 +1,29 @@
 export type SignalSide = "buy" | "sell";
 export type Action = "open_call" | "close_call" | "open_put" | "close_put";
 
+import type { LabelScoreBreakdown } from "./labelScoring";
+
+/** Manual Optimization — a point a user places on the historical chart. */
+export interface ManualPoint {
+  /** Bar index $t$ into the loaded historical series. */
+  index: number;
+  /** Unix epoch seconds (the bar's timestamp) — stored for persistence. */
+  time: number;
+}
+
+/** Which click-driven selection the chart is currently collecting. */
+export type ManualSelectionMode = "off" | "entry" | "exit";
+
+/** Acceptable window around a target entry point, in candles (bars). */
+export interface ManualEntryWindow {
+  /** Candles before the target point still considered acceptable. */
+  preSignal: number;
+  /** Candles after the target point still considered acceptable (lag). */
+  lag: number;
+}
+
+export const DEFAULT_MANUAL_WINDOW: ManualEntryWindow = { preSignal: 2, lag: 5 };
+
 export interface Bar {
   time: number;
   open: number;
@@ -86,7 +109,8 @@ export type OptimizeMetric =
   | "call_profit_pct"
   | "put_profit_pct"
   | "max_runup_pct"
-  | "avg_max_runup_pct";
+  | "avg_max_runup_pct"
+  | "label_score";
 
 export const OPTIMIZE_OPTIONS: { id: OptimizeMetric; label: string }[] = [
   { id: "total_win_rate", label: "Maximize total win rate" },
@@ -97,6 +121,7 @@ export const OPTIMIZE_OPTIONS: { id: OptimizeMetric; label: string }[] = [
   { id: "put_profit_pct", label: "Maximize short profit %" },
   { id: "max_runup_pct", label: "Maximize max run-up %" },
   { id: "avg_max_runup_pct", label: "Maximize average max run-up %" },
+  { id: "label_score", label: "Maximize label score" },
 ];
 
 /** Metrics offered by the cross-timeframe optimizer in the header. */
@@ -272,6 +297,7 @@ export interface OptimizeResult {
   average_profit_pct?: number;
   error?: string;
   viz?: OptimizeViz | null;
+  label_score?: LabelScoreBreakdown | null;
 }
 
 export interface ResultsCatalog {

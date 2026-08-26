@@ -5,9 +5,11 @@ import {
   createChart,
   type IChartApi,
   type ISeriesApi,
+  type MouseEventParams,
+  type SeriesMarker,
   type UTCTimestamp,
 } from "lightweight-charts";
-import type { Bar } from "./types";
+import type { Bar, ManualPoint, ManualSelectionMode } from "./types";
 
 export type ChartZone = "local" | "et" | "ct" | "utc";
 
@@ -23,6 +25,30 @@ interface Props {
   fitKey: string;
   timeZone: ChartZone;
   showIndicators: boolean;
+  /** When not "off", a click on the chart adds/removes a selection point. */
+  selectionMode?: ManualSelectionMode;
+  /** Target entry points ($E_k$) to render as markers. */
+  entryPoints?: ManualPoint[];
+  /** Target exit points ($X_k$) to render as markers. */
+  exitPoints?: ManualPoint[];
+  /** Raised when the user clicks a bar while a selection mode is active.
+   *  `index` is the bar index $t$, `time` its unix-second timestamp. */
+  onSelectPoint?: (kind: "entry" | "exit", index: number, time: number) => void;
+}
+
+/** Return the index of the bar whose time is nearest to `target` (binary search). */
+function nearestIndex(times: number[], target: number): number {
+  let lo = 0;
+  let hi = times.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (times[mid] < target) lo = mid + 1;
+    else hi = mid;
+  }
+  if (lo === 0) return 0;
+  const prev = times[lo - 1];
+  const next = times[lo];
+  return target - prev <= next - target ? lo - 1 : lo;
 }
 
 function ianaFor(zone: ChartZone): string | undefined {
@@ -50,7 +76,16 @@ export function formatChartTime(unix: number, zone: ChartZone, withDate = false)
   return new Date(unix * 1000).toLocaleString("en-US", dateOpts(zone, withDate));
 }
 
-export default function Chart({ bars, fitKey, timeZone, showIndicators }: Props) {
+export default function Chart({
+  bars,
+  fitKey,
+  timeZone,
+  showIndicators,
+  selectionMode = "off",
+  entryPoints = [],
+  exitPoints = [],
+  onSelectPoint,
+}: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -60,6 +95,15 @@ export default function Chart({ bars, fitKey, timeZone, showIndicators }: Props)
   const fittedKeyRef = useRef("");
   const zoneRef = useRef(timeZone);
   zoneRef.current = timeZone;
+
+  // Keep the latest imperative-mode props in refs so the single click handler
+  // subscribed at chart creation always reads current values without resubscribing.
+  const modeRef = useRef<ManualSelectionMode>("off");
+  modeRef.current = selectionMode;
+  const barsRef = useRef<Bar[]>([]);
+  barsRef.current = bars;
+  const onSelectRef = useRef(onSelectPoint);
+  onSelectRef.current = onSelectPoint;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -135,6 +179,22 @@ export default function Chart({ bars, fitKey, timeZone, showIndicators }: Props)
     fastRef.current = fast;
     slowRef.current = slow;
     volumeRef.current = volume;
+
+    chart.subscribeClick((param: MouseEventParams) => {
+      const mode = modeRef.current;
+      if (mode === "off" || !onSelectRef.current) return;
+      const loadedBars = barsRef.current;
+      if (!loadedBars.length || param.time == null) return;
+      // `param.time` is the exact bar time at the click location (numeric for
+      // this continuous, second-resolution series); resolve it to the nearest
+      // loaded bar so a click always maps to a valid $t$.
+      if (typeof param.time !== "number") return;
+      const index = nearestIndex(
+        loadedBars.map((bar) => bar.time),
+        param.time,
+      );
+      onSelectRef.current(mode, index, loadedBars[index].time);
+    });
 
     const resize = () => {
       chart.applyOptions({
@@ -215,30 +275,60 @@ export default function Chart({ bars, fitKey, timeZone, showIndicators }: Props)
         color: bar.close >= bar.open ? "rgba(38, 166, 154, 0.35)" : "rgba(239, 83, 80, 0.35)",
       }))
     );
-    candleRef.current.setMarkers(
-      showIndicators
-        ? unique
-            .filter((bar) => bar.actions?.length)
-            .map((bar) => {
+    const markers: SeriesMarker<UTCTimestamp>[] = [];
+    if (showIndicators) {
+      unique
+        .filter((bar) => bar.actions?.length)
+        .forEach((bar) => {
           const callish =
             bar.actions!.includes("open_call") || bar.actions!.includes("close_put");
-          return {
+          markers.push({
             time: bar.time as UTCTimestamp,
             position: (callish ? "belowBar" : "aboveBar") as "belowBar" | "aboveBar",
             color: callish ? "#00e676" : "#ff5252",
             shape: (callish ? "arrowUp" : "arrowDown") as "arrowUp" | "arrowDown",
             size: 2.5,
-              };
-            })
-        : []
-    );
+          });
+        });
+    }
+    // Resolve manual entry ($E_k$) / exit ($X_k$) point indices against the
+    // unique times used for the series so markers land on the exact bar.
+    const timeIndex = new Map<number, number>();
+    unique.forEach((bar, i) => timeIndex.set(bar.time, i));
+    entryPoints.forEach((p, k) => {
+      const t = timeIndex.get(p.time);
+      if (t == null) return;
+      markers.push({
+        time: p.time as UTCTimestamp,
+        position: "inBar",
+        color: "#00e676",
+        shape: "circle",
+        size: 1.6,
+        id: `manual-entry-${k}`,
+        text: (k + 1).toString(),
+      });
+    });
+    exitPoints.forEach((p, k) => {
+      const t = timeIndex.get(p.time);
+      if (t == null) return;
+      markers.push({
+        time: p.time as UTCTimestamp,
+        position: "inBar",
+        color: "#ff5252",
+        shape: "circle",
+        size: 1.6,
+        id: `manual-exit-${k}`,
+        text: (k + 1).toString(),
+      });
+    });
+    candleRef.current.setMarkers(markers);
     if (fittedKeyRef.current !== fitKey) {
       fittedKeyRef.current = fitKey;
       chartRef.current?.timeScale().fitContent();
     } else {
       chartRef.current?.timeScale().scrollToRealTime();
     }
-  }, [bars, fitKey, showIndicators]);
+  }, [bars, fitKey, showIndicators, entryPoints, exitPoints]);
 
   return <div className="chart-host" ref={hostRef} />;
 }

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Chart, { CHART_ZONES, formatChartTime, type ChartZone } from "./Chart";
 import { fetchCatalog, fetchChart, fetchMeta, fetchTimeframes, streamChart, watchUrl } from "./api";
-import { runFrontendOptimization, runMultiTimeframeOptimization, type CrossTfProgress, type CrossTfResult } from "./gmaOptimizer";
-import { CROSS_TF_OPTIMIZE_OPTIONS, DEFAULT_PARAMS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_SIGMA_MAX, GMA_SIGMA_MIN, clampGmaParams, gmaScale, isValidGmaPair, OPTIMIZE_OPTIONS, type Bar, type GmaParams, type LoadProgress, type OptimizeMetric, type OptimizeProgress, type OptimizeResult } from "./types";
+import { runFrontendOptimization, runMultiTimeframeOptimization, type CrossTfProgress, type CrossTfResult, type LabelScoringOptions } from "./gmaOptimizer";
+import { CROSS_TF_OPTIMIZE_OPTIONS, DEFAULT_MANUAL_WINDOW, DEFAULT_PARAMS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_SIGMA_MAX, GMA_SIGMA_MIN, clampGmaParams, gmaScale, isValidGmaPair, OPTIMIZE_OPTIONS, type Bar, type GmaParams, type LoadProgress, type ManualEntryWindow, type ManualPoint, type ManualSelectionMode, type OptimizeMetric, type OptimizeProgress, type OptimizeResult } from "./types";
 
 import { computeTradeStats, formatActions, formatPct, formatPoints, formatWinRateLine, isUpAction, withActions } from "./tradeStats";
 
@@ -17,6 +17,12 @@ function formatClock(iso: string | null, zone: ChartZone): string {
 }
 
 function optimizationScore(result: OptimizeResult, metric: OptimizeMetric): string {
+  if (metric === "label_score") {
+    const total = result.label_score?.totalScore;
+    if (total == null || !Number.isFinite(total)) return "—";
+    const sign = total > 0 ? "+" : "";
+    return `${sign}${total.toFixed(2)}`;
+  }
   const value = {
     total_win_rate: result.win_rate,
     call_win_rate: result.call_win_rate,
@@ -63,6 +69,10 @@ export default function App() {
   const [crossTfOptimizing, setCrossTfOptimizing] = useState(false);
   const [gmaApplied, setGmaApplied] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [manualMode, setManualMode] = useState<ManualSelectionMode>("off");
+  const [entryPoints, setEntryPoints] = useState<ManualPoint[]>([]);
+  const [exitPoints, setExitPoints] = useState<ManualPoint[]>([]);
+  const [entryWindow, setEntryWindow] = useState<ManualEntryWindow>(DEFAULT_MANUAL_WINDOW);
   const fingerprintRef = useRef("");
   const paramsRef = useRef(params);
   const requestRef = useRef(0);
@@ -237,6 +247,66 @@ export default function App() {
     setOptimizationResult(null);
   };
 
+  /** Toggle a manual entry/exit point on or off, keeping the list sorted by time. */
+  const toggleManualPoint = (
+    kind: "entry" | "exit",
+    index: number,
+    time: number,
+  ) => {
+    const setter = kind === "entry" ? setEntryPoints : setExitPoints;
+    setter((current) => {
+      const exists = current.some(
+        (point) => point.index === index || point.time === time,
+      );
+      if (exists) {
+        return current.filter(
+          (point) => point.index !== index && point.time !== time,
+        );
+      }
+      return [...current, { index, time }].sort((a, b) => a.index - b.index);
+    });
+  };
+
+  const removeManualPoint = (
+    kind: "entry" | "exit",
+    index: number,
+    time: number,
+  ) => {
+    const setter = kind === "entry" ? setEntryPoints : setExitPoints;
+    setter((current) =>
+      current.filter(
+        (point) => point.index !== index || point.time !== time,
+      ),
+    );
+  };
+
+  const clearManualPoints = (kind: "entry" | "exit") => {
+    const setter = kind === "entry" ? setEntryPoints : setExitPoints;
+    setter([]);
+  };
+
+  // Bar indices/timestamps are only meaningful for the currently loaded series;
+  // drop stale manual points whenever the symbol or timeframe changes.
+  useEffect(() => {
+    setEntryPoints([]);
+    setExitPoints([]);
+    setManualMode("off");
+  }, [symbol, effectiveTf]);
+
+  // The captured entry/exit points + acceptable window form the ground-truth
+  // labels the optimizer scores against when `label_score` is the objective.
+  const hasManualLabels = entryPoints.length > 0 || exitPoints.length > 0;
+  const labelScoring: LabelScoringOptions = useMemo(
+    () => ({
+      labels: {
+        entries: entryPoints.map((p) => ({ barIndex: p.index, time: p.time })),
+        exits: exitPoints.map((p) => ({ barIndex: p.index, time: p.time })),
+      },
+      window: { preSignal: entryWindow.preSignal, lag: entryWindow.lag },
+    }),
+    [entryPoints, exitPoints, entryWindow],
+  );
+
   const applyGma = () => {
     if (!locked && gmaPairOk) {
       setApplyingGma(true);
@@ -261,6 +331,7 @@ export default function App() {
         minTrades,
         maxTrades,
         (progress) => setOptimizationProgress(progress),
+        labelScoring,
       );
       setOptimizationResult(result);
     } catch (err) {
@@ -306,6 +377,7 @@ export default function App() {
         minTrades,
         maxTrades,
         (progress) => setCrossTfProgress(progress),
+        labelScoring,
       );
       setCrossTfResult(result);
     } catch (err) {
@@ -572,7 +644,14 @@ export default function App() {
           <button
             type="button"
             className="optimize"
-            disabled={locked || busy || optimizing || !symbol || !effectiveTf}
+            disabled={
+              locked ||
+              busy ||
+              optimizing ||
+              !symbol ||
+              !effectiveTf ||
+              (optimizationFeature === "label_score" && !hasManualLabels)
+            }
             onClick={optimizeGmas}
           >
             {optimizing
@@ -581,6 +660,12 @@ export default function App() {
                 : "Starting optimization…"
               : "Optimize GMAs"}
           </button>
+          {optimizationFeature === "label_score" && !hasManualLabels && (
+            <p className="hint optimizer-status">
+              Select entry/exit points in Manual Optimization first — the label
+              score needs ground-truth bars to optimize against.
+            </p>
+          )}
           {optimizationProgress && (
             <p className="hint optimizer-status">
               {optimizationProgress.message}
@@ -596,6 +681,19 @@ export default function App() {
                 <div><dt>Fast GMA</dt><dd>L {optimizationResult.params.fast_length} · σ {optimizationResult.params.fast_sigma.toFixed(1)}</dd></div>
                 <div><dt>Slow GMA</dt><dd>L {optimizationResult.params.slow_length} · σ {optimizationResult.params.slow_sigma.toFixed(1)}</dd></div>
               </dl>
+              {optimizationFeature === "label_score" &&
+                optimizationResult.label_score && (
+                  <dl className="optimizer-params label-score-breakdown">
+                    <div><dt>Entry proximity</dt><dd>+{optimizationResult.label_score.entryProximitySum.toFixed(2)}</dd></div>
+                    <div><dt>Exit proximity</dt><dd>+{optimizationResult.label_score.exitProximitySum.toFixed(2)}</dd></div>
+                    <div><dt>Matched E</dt><dd>{optimizationResult.label_score.entryMatches.length}</dd></div>
+                    <div><dt>Matched X</dt><dd>{optimizationResult.label_score.exitMatches.length}</dd></div>
+                    <div><dt>False positives</dt><dd className="neg">{optimizationResult.label_score.falsePositives}</dd></div>
+                    <div><dt>Missed E</dt><dd className="neg">{optimizationResult.label_score.entryFalseNegatives}</dd></div>
+                    <div><dt>Missed X</dt><dd className="neg">{optimizationResult.label_score.exitFalseNegatives}</dd></div>
+                    <div><dt>Total</dt><dd className="total">{optimizationScore(optimizationResult, "label_score")}</dd></div>
+                  </dl>
+                )}
               <button
                 type="button"
                 className="optimize apply-gma"
@@ -606,6 +704,164 @@ export default function App() {
               </button>
             </div>
           )}
+        </section>
+        <section className="manual-optimizer">
+          <h2>Manual Optimization</h2>
+          <p className="hint">
+            Pick a mode, then click the chart to mark bars. Selected points are
+            stored as timestamps and shown below.
+          </p>
+          <div className="view-toggle manual-mode-toggle">
+            <button
+              type="button"
+              className={manualMode === "off" ? "active" : ""}
+              disabled={busy || !symbol || !effectiveTf}
+              onClick={() => setManualMode("off")}
+            >
+              Off
+            </button>
+            <button
+              type="button"
+              className={manualMode === "entry" ? "active" : ""}
+              disabled={busy || !symbol || !effectiveTf}
+              onClick={() => setManualMode("entry")}
+            >
+              Entry E
+            </button>
+            <button
+              type="button"
+              className={manualMode === "exit" ? "active" : ""}
+              disabled={busy || !symbol || !effectiveTf}
+              onClick={() => setManualMode("exit")}
+            >
+              Exit X
+            </button>
+          </div>
+          {manualMode !== "off" && (
+            <p className="hint manual-mode-hint">
+              {manualMode === "entry"
+                ? "Click chart to mark target entry points (E)."
+                : "Click chart to mark target exit points (X)."}{" "}
+              Click an existing point to remove it.
+            </p>
+          )}
+          <fieldset className="manual-window">
+            <legend>Acceptable Entry Window</legend>
+            <label>
+              Pre-Signal
+              <input
+                type="number"
+                min={0}
+                value={entryWindow.preSignal}
+                disabled={busy}
+                onChange={(e) =>
+                  setEntryWindow((w) => ({
+                    ...w,
+                    preSignal: Math.max(0, Number(e.target.value) || 0),
+                  }))
+                }
+              />
+            </label>
+            <label>
+              Lag
+              <input
+                type="number"
+                min={0}
+                value={entryWindow.lag}
+                disabled={busy}
+                onChange={(e) =>
+                  setEntryWindow((w) => ({
+                    ...w,
+                    lag: Math.max(0, Number(e.target.value) || 0),
+                  }))
+                }
+              />
+            </label>
+            <p className="hint manual-formula">
+              Acceptable entry range: [t − {entryWindow.preSignal}, t +{" "}
+              {entryWindow.lag}]
+            </p>
+          </fieldset>
+          <div className="manual-points-block">
+            <div className="manual-points-head">
+              <span className="manual-points-title">Entries (E)</span>
+              <span className="manual-points-count">{entryPoints.length}</span>
+              <button
+                type="button"
+                className="manual-clear"
+                disabled={entryPoints.length === 0 || busy}
+                onClick={() => clearManualPoints("entry")}
+              >
+                Clear
+              </button>
+            </div>
+            {entryPoints.length === 0 ? (
+              <p className="hint manual-empty">
+                No target entry points selected.
+              </p>
+            ) : (
+              <ul className="manual-list">
+                {entryPoints.map((point, k) => (
+                  <li key={`${point.index}-${point.time}`}>
+                    <span className="manual-kind entry">E{k + 1}</span>
+                    <span className="manual-time">
+                      {formatChartTime(point.time, chartZone, true)}
+                    </span>
+                    <span className="manual-bar">bar {point.index}</span>
+                    <button
+                      type="button"
+                      className="manual-remove"
+                      aria-label={`Remove entry ${k + 1}`}
+                      onClick={() =>
+                        removeManualPoint("entry", point.index, point.time)
+                      }
+                    >
+                      ×
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div className="manual-points-block">
+            <div className="manual-points-head">
+              <span className="manual-points-title">Exits (X)</span>
+              <span className="manual-points-count">{exitPoints.length}</span>
+              <button
+                type="button"
+                className="manual-clear"
+                disabled={exitPoints.length === 0 || busy}
+                onClick={() => clearManualPoints("exit")}
+              >
+                Clear
+              </button>
+            </div>
+            {exitPoints.length === 0 ? (
+              <p className="hint manual-empty">No target exits selected.</p>
+            ) : (
+              <ul className="manual-list">
+                {exitPoints.map((point, k) => (
+                  <li key={`${point.index}-${point.time}`}>
+                    <span className="manual-kind exit">X{k + 1}</span>
+                    <span className="manual-time">
+                      {formatChartTime(point.time, chartZone, true)}
+                    </span>
+                    <span className="manual-bar">bar {point.index}</span>
+                    <button
+                      type="button"
+                      className="manual-remove"
+                      aria-label={`Remove X${k + 1}`}
+                      onClick={() =>
+                        removeManualPoint("exit", point.index, point.time)
+                      }
+                    >
+                      ×
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </section>
         <section className="stats">
           <h2>Session</h2>
@@ -809,6 +1065,10 @@ export default function App() {
             fitKey={`${symbol}|${effectiveTf}`}
             timeZone={chartZone}
             showIndicators={gmaApplied}
+            selectionMode={manualMode}
+            entryPoints={entryPoints}
+            exitPoints={exitPoints}
+            onSelectPoint={toggleManualPoint}
           />
         </div>
         <section className="legend">

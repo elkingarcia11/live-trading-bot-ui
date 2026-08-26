@@ -4,6 +4,19 @@ import type {
   OptimizeProgress,
   OptimizeResult,
 } from "./types";
+import {
+  LABEL_SCORING_SOURCE,
+  DEFAULT_LABEL_WINDOW,
+  DEFAULT_LABEL_SCORE_WEIGHTS,
+  type GroundTruthLabels,
+  type LabelWindow,
+  type LabelScoreWeights,
+  type LabelScoreBreakdown,
+} from "./labelScoring";
+
+// types.ts now includes both `"label_score"` in the OptimizeMetric union and an
+// optional `label_score?: LabelScoreBreakdown` on OptimizeResult, so callers
+// outside this file get full typing on the new metric without a local cast.
 
 const WORKER_SOURCE = `
 const LENGTHS = [...Array(30)].map((_, i) => i + 1).concat([...Array(10)].map((_, i) => 32 + i * 2));
@@ -12,6 +25,8 @@ const ET_FORMAT = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
   hour: "2-digit", minute: "2-digit", hour12: false, hourCycle: "h23"
 });
+
+${LABEL_SCORING_SOURCE}
 
 function sourceSma(src, period) {
   const out = new Float64Array(src.length).fill(NaN);
@@ -102,7 +117,13 @@ function score(close, high, low, events) {
   let closed = 0, wins = 0, longClosed = 0, shortClosed = 0, longWins = 0, shortWins = 0;
   let profit = 0, longProfit = 0, shortProfit = 0, profitPct = 0, longProfitPct = 0, shortProfitPct = 0;
   let tradeRunup = 0, maxRunup = 0, totalRunup = 0;
-  const closeTrade = (price) => {
+  // Bar indices where a position was actually opened / closed during simulation.
+  // These (not the raw buy/sell/flatten crossover arrays) are what a ground-truth
+  // entry/exit label should be matched against, since they reflect what the
+  // strategy actually did once side-flipping and flatten rules are applied.
+  const entryIndices = [];
+  const exitIndices = [];
+  const closeTrade = (price, index) => {
     if (!side) return;
     const pnl = side === 1 ? price - entry : entry - price;
     const pct = entry === 0 ? 0 : pnl / entry * 100;
@@ -114,6 +135,7 @@ function score(close, high, low, events) {
     } else {
       shortClosed++; shortWins += pnl > 0 ? 1 : 0; shortProfit += pnl; shortProfitPct += pct;
     }
+    exitIndices.push(index);
     side = 0;
   };
   while (bi < events.buy.length || si < events.sell.length || fi < events.flatten.length) {
@@ -128,20 +150,21 @@ function score(close, high, low, events) {
       tradeRunup = Math.max(tradeRunup, (entry - low[index]) / entry * 100);
     }
     if (f === index) {
-      fi++; if (b === index) bi++; if (s === index) si++; closeTrade(price);
+      fi++; if (b === index) bi++; if (s === index) si++; closeTrade(price, index);
     } else if (b === index) {
-      bi++; if (side === -1) closeTrade(price); if (!side) { entry = price; side = 1; tradeRunup = Math.max(0, (high[index] - price) / price * 100); }
+      bi++; if (side === -1) closeTrade(price, index); if (!side) { entry = price; side = 1; entryIndices.push(index); tradeRunup = Math.max(0, (high[index] - price) / price * 100); }
     } else {
-      si++; if (side === 1) closeTrade(price); if (!side) { entry = price; side = -1; tradeRunup = Math.max(0, (price - low[index]) / price * 100); }
+      si++; if (side === 1) closeTrade(price, index); if (!side) { entry = price; side = -1; entryIndices.push(index); tradeRunup = Math.max(0, (price - low[index]) / price * 100); }
     }
   }
-  return { closed, wins, longClosed, shortClosed, longWins, shortWins, profit, longProfit, shortProfit, profitPct, longProfitPct, shortProfitPct, maxRunup, avgMaxRunup: closed ? totalRunup / closed : 0 };
+  return { closed, wins, longClosed, shortClosed, longWins, shortWins, profit, longProfit, shortProfit, profitPct, longProfitPct, shortProfitPct, maxRunup, avgMaxRunup: closed ? totalRunup / closed : 0, entryIndices, exitIndices };
 }
 
 self.onmessage = (event) => {
-  const { close, high, low, times, symbol, timeframe, metric, minTrades, maxTrades } = event.data;
+  const { close, high, low, times, symbol, timeframe, metric, minTrades, maxTrades, labels, labelWindow, labelWeights } = event.data;
   const minT = Math.max(1, Number.isFinite(minTrades) ? minTrades : 1);
   const maxT = Number.isFinite(maxTrades) ? maxTrades : Infinity;
+  const useLabels = metric === "label_score" && labels && (labels.entries.length || labels.exits.length);
   const ema = sourceEma(close, 3);
   const sma = sourceSma(close, 3);
   const masks = sessionMasks(times);
@@ -157,14 +180,23 @@ self.onmessage = (event) => {
   for (let i = 0; i < pairs.length; i++) {
     const [fastIndex, slowIndex] = pairs[i];
     const stats = score(close, high, low, tradeIndices(fastGrid[fastIndex], slowGrid[slowIndex], masks));
-    const value = metric === "total_win_rate" ? (stats.closed ? stats.wins / stats.closed * 100 : 0)
-      : metric === "call_win_rate" ? (stats.longClosed ? stats.longWins / stats.longClosed * 100 : 0)
-      : metric === "put_win_rate" ? (stats.shortClosed ? stats.shortWins / stats.shortClosed * 100 : 0)
-      : metric === "total_profit_pct" ? stats.profitPct
-      : metric === "call_profit_pct" ? stats.longProfitPct
-      : metric === "put_profit_pct" ? stats.shortProfitPct
-      : metric === "max_runup_pct" ? stats.maxRunup : stats.avgMaxRunup;
-    if (stats.closed >= minT && stats.closed <= maxT && (!best || value > best.value)) best = { value, fastIndex, slowIndex, stats };
+    let labelBreakdown = null;
+    let value;
+    if (metric === "label_score") {
+      labelBreakdown = useLabels
+        ? scoreLabelSet(labels.entries, labels.exits, stats.entryIndices, stats.exitIndices, labelWindow, labelWeights)
+        : { entryMatches: [], exitMatches: [], entryFalseNegatives: 0, exitFalseNegatives: 0, falsePositives: 0, entryProximitySum: 0, exitProximitySum: 0, totalScore: 0 };
+      value = labelBreakdown.totalScore;
+    } else {
+      value = metric === "total_win_rate" ? (stats.closed ? stats.wins / stats.closed * 100 : 0)
+        : metric === "call_win_rate" ? (stats.longClosed ? stats.longWins / stats.longClosed * 100 : 0)
+        : metric === "put_win_rate" ? (stats.shortClosed ? stats.shortWins / stats.shortClosed * 100 : 0)
+        : metric === "total_profit_pct" ? stats.profitPct
+        : metric === "call_profit_pct" ? stats.longProfitPct
+        : metric === "put_profit_pct" ? stats.shortProfitPct
+        : metric === "max_runup_pct" ? stats.maxRunup : stats.avgMaxRunup;
+    }
+    if (stats.closed >= minT && stats.closed <= maxT && (!best || value > best.value)) best = { value, fastIndex, slowIndex, stats, labelBreakdown };
     if (i % 250 === 0 || i === pairs.length - 1) self.postMessage({ type: "progress", pct: 5 + i / pairs.length * 95, frame: i, frames: pairs.length, tested: i + 1, total: pairs.length, timeframe, message: "Testing GMA parameter pairs" });
   }
   if (!best) throw new Error("No GMA combination produced enough closed trades");
@@ -179,7 +211,8 @@ self.onmessage = (event) => {
     profit_pct: s.profitPct, call_profit_pct: s.longProfitPct, put_profit_pct: s.shortProfitPct,
     closed_trades: s.closed, close_calls: s.longClosed, close_puts: s.shortClosed,
     wins: s.wins, call_wins: s.longWins, put_wins: s.shortWins, bars: close.length, tested: pairs.length,
-    max_runup_pct: s.maxRunup, avg_max_runup_pct: s.avgMaxRunup
+    max_runup_pct: s.maxRunup, avg_max_runup_pct: s.avgMaxRunup,
+    label_score: best.labelBreakdown
   }});
 };
 `;
@@ -195,12 +228,17 @@ interface WorkerProgress {
   message: string;
 }
 
+/** OptimizeResult plus the optional label-score breakdown, until types.ts adds the field. */
+export type OptimizeResultWithLabelScore = OptimizeResult & {
+  label_score?: LabelScoreBreakdown | null;
+};
+
 interface WorkerDone {
   type: "done";
-  result: OptimizeResult;
+  result: OptimizeResultWithLabelScore;
 }
 
-export interface CrossTfResult extends OptimizeResult {
+export interface CrossTfResult extends OptimizeResultWithLabelScore {
   timeframe: string;
   /** Input-order index used for deterministic tiebreaking only. */
   _tfIndex: number;
@@ -217,6 +255,13 @@ export interface CrossTfProgress {
   message: string;
 }
 
+/** Optional ground-truth label scoring inputs, only used when metric === "label_score". */
+export interface LabelScoringOptions {
+  labels: GroundTruthLabels;
+  window?: LabelWindow;
+  weights?: LabelScoreWeights;
+}
+
 function runSingleOptimize(
   bars: Bar[],
   symbol: string,
@@ -225,7 +270,8 @@ function runSingleOptimize(
   minTrades: number,
   maxTrades: number | null,
   onProgress: (progress: OptimizeProgress) => void,
-): Promise<OptimizeResult> {
+  labelScoring?: LabelScoringOptions,
+): Promise<OptimizeResultWithLabelScore> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(
       new Blob([WORKER_SOURCE], { type: "application/javascript" }),
@@ -266,6 +312,9 @@ function runSingleOptimize(
         metric,
         minTrades,
         maxTrades,
+        labels: labelScoring?.labels ?? null,
+        labelWindow: labelScoring?.window ?? DEFAULT_LABEL_WINDOW,
+        labelWeights: labelScoring?.weights ?? DEFAULT_LABEL_SCORE_WEIGHTS,
       },
       [close.buffer, high.buffer, low.buffer],
     );
@@ -280,7 +329,8 @@ export function runFrontendOptimization(
   minTrades: number,
   maxTrades: number | null,
   onProgress: (progress: OptimizeProgress) => void,
-): Promise<OptimizeResult> {
+  labelScoring?: LabelScoringOptions,
+): Promise<OptimizeResultWithLabelScore> {
   return runSingleOptimize(
     bars,
     symbol,
@@ -289,6 +339,7 @@ export function runFrontendOptimization(
     minTrades,
     maxTrades,
     onProgress,
+    labelScoring,
   );
 }
 
@@ -303,6 +354,12 @@ export function runFrontendOptimization(
  * a deterministic tiebreak (higher metric score, then more closed trades, then
  * earlier input order) so the outcome is identical regardless of completion
  * order — no race conditions or illogical ordering.
+ *
+ * When `metric` is `"label_score"`, `labelScoring.labels` are matched against
+ * each candidate's actual entry/exit bar indices (see the Worker's `score()`),
+ * using the exact same ground-truth points for every timeframe. Ground-truth
+ * bar indices are expected to already be aligned to each series' own bar
+ * spacing by the caller (the label editor is timeframe-specific).
  */
 export async function runMultiTimeframeOptimization(
   series: { timeframe: string; bars: Bar[] }[],
@@ -311,6 +368,7 @@ export async function runMultiTimeframeOptimization(
   minTrades: number,
   maxTrades: number | null,
   onProgress: (progress: CrossTfProgress) => void,
+  labelScoring?: LabelScoringOptions,
 ): Promise<CrossTfResult> {
   const total = series.length;
   if (total === 0) throw new Error("No timeframes to optimize");
@@ -352,7 +410,7 @@ export async function runMultiTimeframeOptimization(
     });
   };
 
-  const consider = (tfIndex: number, single: OptimizeResult) => {
+  const consider = (tfIndex: number, single: OptimizeResultWithLabelScore) => {
     const timeframe = series[tfIndex].timeframe;
     if (
       !best ||
@@ -382,6 +440,7 @@ export async function runMultiTimeframeOptimization(
           minTrades,
           maxTrades,
           (p) => emitProgress(tfIndex, p),
+          labelScoring,
         );
         return { tfIndex, single };
       }),
@@ -398,7 +457,10 @@ export async function runMultiTimeframeOptimization(
   return best;
 }
 
-function metricScore(result: OptimizeResult, metric: OptimizeMetric): number {
+function metricScore(
+  result: OptimizeResultWithLabelScore,
+  metric: OptimizeMetric,
+): number {
   switch (metric) {
     case "total_win_rate":
       return result.win_rate;
@@ -408,6 +470,8 @@ function metricScore(result: OptimizeResult, metric: OptimizeMetric): number {
       return result.max_runup_pct ?? Number.NEGATIVE_INFINITY;
     case "avg_max_runup_pct":
       return result.avg_max_runup_pct ?? Number.NEGATIVE_INFINITY;
+    case "label_score":
+      return result.label_score?.totalScore ?? Number.NEGATIVE_INFINITY;
     default:
       return Number.NEGATIVE_INFINITY;
   }
