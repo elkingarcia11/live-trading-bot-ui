@@ -51,11 +51,11 @@ export function fetchCatalog(): Promise<CatalogResponse> {
   return fetch("/api/catalog").then((r) => readJson<CatalogResponse>(r));
 }
 
-export function fetchTimeframes(symbol: string): Promise<string[]> {
+export function fetchTimeframes(symbol: string): Promise<{ timeframes: string[]; custom: boolean }> {
   const q = new URLSearchParams({ symbol });
   return fetch(`/api/timeframes?${q.toString()}`)
-    .then((r) => readJson<{ symbol: string; timeframes: string[] }>(r))
-    .then((data) => data.timeframes);
+    .then((r) => readJson<{ symbol: string; timeframes: string[]; custom?: boolean }>(r))
+    .then((data) => ({ timeframes: data.timeframes, custom: Boolean(data.custom) }));
 }
 
 type StreamEvent<T, P extends { type: "progress" } = { type: "progress" }> =

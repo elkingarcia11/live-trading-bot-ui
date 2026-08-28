@@ -27,8 +27,8 @@ def parse_spec(spec: str) -> tuple[str, int]:
     if value < 1:
         raise ValueError("Timeframe size must be >= 1")
     if unit == "t":
-        if value < 2 or value > 100_000:
-            raise ValueError("Tick aggregate must be between 2 and 100000")
+        if value < 1 or value > 100_000:
+            raise ValueError("Tick aggregate must be between 1 and 100000")
         return "tick", value
     seconds = value * _UNIT_SECONDS[unit]
     if seconds > 86_400:
@@ -66,6 +66,34 @@ def aggregate_trades(
     return attach_source_mas(bars)
 
 
+def aggregate_ohlcv(
+    bars: pd.DataFrame,
+    spec: str,
+    on_progress: AggProgressFn | None = None,
+) -> pd.DataFrame:
+    """Roll already-built OHLCV bars up to a coarser tick or time spec."""
+    def note(message: str, frac: float) -> None:
+        if on_progress is not None:
+            on_progress(message, frac)
+
+    kind, size = parse_spec(spec)
+    note(f"Preparing {len(bars):,} source bars", 0.05)
+    frame = _prepare_ohlcv(bars)
+    if frame.empty:
+        return _empty_ohlcv()
+    if kind == "tick" and size == 1:
+        note(f"Using {len(frame):,} 1t bars", 0.8)
+        return attach_source_mas(frame)
+    if kind == "tick":
+        note(f"Grouping every {size} bars", 0.4)
+        out = _tick_ohlcv_bars(frame, size)
+    else:
+        note(f"Bucketing bars to {spec}", 0.4)
+        out = _time_ohlcv_bars(frame, size)
+    note(f"Computing source MAs on {len(out):,} bars", 0.8)
+    return attach_source_mas(out)
+
+
 def attach_source_mas(frame: pd.DataFrame) -> pd.DataFrame:
     """Compute EMA(3) and SMA(3) once on close for chart/optimize reuse."""
     if frame.empty or "close" not in frame.columns:
@@ -93,6 +121,65 @@ def _prepare_trades(trades: pd.DataFrame) -> pd.DataFrame:
     frame = frame.dropna(subset=["timestamp", "price"])
     frame["size"] = frame["size"].fillna(0.0)
     return frame.sort_values("timestamp").reset_index(drop=True)
+
+
+def _prepare_ohlcv(bars: pd.DataFrame) -> pd.DataFrame:
+    required = {"timestamp", "open", "high", "low", "close"}
+    if bars.empty:
+        return _empty_ohlcv()
+    if not required.issubset(bars.columns):
+        raise ValueError("OHLCV bars must include timestamp, open, high, low, and close")
+    frame = bars.loc[:, ["timestamp", "open", "high", "low", "close"]].copy()
+    if "volume" in bars.columns:
+        frame["volume"] = bars["volume"]
+    else:
+        frame["volume"] = 0
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
+    for column in ("open", "high", "low", "close", "volume"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    return frame.dropna(
+        subset=["timestamp", "open", "high", "low", "close"]
+    ).sort_values("timestamp").reset_index(drop=True)
+
+
+def _tick_ohlcv_bars(bars: pd.DataFrame, n: int) -> pd.DataFrame:
+    if bars.empty:
+        return _empty_ohlcv()
+    session = et_session_key(bars["timestamp"])
+    bar_i = bars.groupby(session, sort=False).cumcount() // n
+    grouped = bars.assign(_session=session, _bar=bar_i).groupby(
+        ["_session", "_bar"], sort=True
+    )
+    return grouped.agg(
+        timestamp=("timestamp", "first"),
+        open=("open", "first"),
+        high=("high", "max"),
+        low=("low", "min"),
+        close=("close", "last"),
+        volume=("volume", "sum"),
+    ).reset_index(drop=True)
+
+
+def _time_ohlcv_bars(bars: pd.DataFrame, seconds: int) -> pd.DataFrame:
+    if seconds % 3600 == 0:
+        freq = f"{seconds // 3600}h"
+    elif seconds % 60 == 0:
+        freq = f"{seconds // 60}min"
+    else:
+        freq = f"{seconds}s"
+    chicago = bars["timestamp"].dt.tz_convert("America/Chicago")
+    bucket = chicago.dt.floor(freq)
+    grouped = bars.assign(_bucket=bucket).groupby("_bucket", sort=True)
+    out = grouped.agg(
+        open=("open", "first"),
+        high=("high", "max"),
+        low=("low", "min"),
+        close=("close", "last"),
+        volume=("volume", "sum"),
+    ).reset_index()
+    out = out.rename(columns={"_bucket": "timestamp"})
+    out["timestamp"] = out["timestamp"].dt.tz_convert("UTC")
+    return out[["timestamp", "open", "high", "low", "close", "volume"]]
 
 
 def _tick_bars(trades: pd.DataFrame, n: int) -> pd.DataFrame:

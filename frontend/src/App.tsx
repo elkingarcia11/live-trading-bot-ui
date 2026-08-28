@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Chart, { CHART_ZONES, formatChartTime, type ChartHandle, type ChartZone } from "./Chart";
 import { fetchCatalog, fetchChart, fetchMeta, fetchTimeframes, streamChart, watchUrl } from "./api";
 import { isOptimizationAbort, runFrontendOptimization, runMultiTimeframeOptimization, type CrossTfProgress, type CrossTfResult, type LabelScoringOptions } from "./gmaOptimizer";
-import { CROSS_TF_OPTIMIZE_OPTIONS, DEFAULT_MANUAL_WINDOW, DEFAULT_PARAMS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_SIGMA_MAX, GMA_SIGMA_MIN, clampGmaParams, gmaScale, isValidGmaPair, OPTIMIZE_OPTIONS, type Bar, type GmaParams, type LoadProgress, type ManualEntryWindow, type ManualPoint, type ManualSelectionMode, type OptimizeMetric, type OptimizeProgress, type OptimizeResult } from "./types";
+import { CROSS_TF_OPTIMIZE_OPTIONS, CUSTOM_TIMEFRAME, DEFAULT_MANUAL_WINDOW, DEFAULT_PARAMS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_SIGMA_MAX, GMA_SIGMA_MIN, clampGmaParams, gmaScale, isValidGmaPair, isValidTimeframeSpec, normalizeTimeframeSpec, OPTIMIZE_OPTIONS, type Bar, type GmaParams, type LoadProgress, type ManualEntryWindow, type ManualPoint, type ManualSelectionMode, type OptimizeMetric, type OptimizeProgress, type OptimizeResult } from "./types";
 
 import { computeTradeStats, formatActions, formatPct, formatPoints, formatWinRateLine, isUpAction, withActions } from "./tradeStats";
 
@@ -44,8 +44,11 @@ function optimizationLabel(metric: OptimizeMetric): string {
 export default function App() {
   const [catalog, setCatalog] = useState<Record<string, string[]>>({});
   const [timeframesBySymbol, setTimeframesBySymbol] = useState<Record<string, string[]>>({});
+  const [customAvailableBySymbol, setCustomAvailableBySymbol] = useState<Record<string, boolean>>({});
   const [symbol, setSymbol] = useState("");
   const [timeframe, setTimeframe] = useState("");
+  const [customMode, setCustomMode] = useState(false);
+  const [customDraft, setCustomDraft] = useState("");
   const [source, setSource] = useState<"ohlcv" | "trades" | "continuous" | "">("");
   const [chartZone, setChartZone] = useState<ChartZone>("local");
   const [params, setParams] = useState<GmaParams>(DEFAULT_PARAMS);
@@ -53,6 +56,7 @@ export default function App() {
   const [bars, setBars] = useState<Bar[]>([]);
   const [updated, setUpdated] = useState<string | null>(null);
   const [loadedAt, setLoadedAt] = useState<string | null>(null);
+  const [chartPath, setChartPath] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "live" | "stale">("idle");
   const [busy, setBusy] = useState(false);
@@ -77,15 +81,21 @@ export default function App() {
   const fingerprintRef = useRef("");
   const paramsRef = useRef(params);
   const requestRef = useRef(0);
+  const busyRef = useRef(false);
   const chartHandleRef = useRef<ChartHandle | null>(null);
   const gmaOptAbortRef = useRef<AbortController | null>(null);
   const crossTfAbortRef = useRef<AbortController | null>(null);
+  const customModeRef = useRef(customMode);
+  customModeRef.current = customMode;
   paramsRef.current = params;
   const locked = false;
 
   const symbols = useMemo(() => Object.keys(catalog).sort(), [catalog]);
   const timeframes = timeframesBySymbol[symbol] ?? [];
   const timeframesLoading = Boolean(symbol) && !timeframesBySymbol[symbol];
+  const customAvailable = Boolean(customAvailableBySymbol[symbol]);
+  const listedTimeframe = Boolean(timeframe) && timeframes.includes(timeframe);
+  const customSelectActive = customMode || Boolean(timeframe && !listedTimeframe);
   const effectiveTf = timeframe;
   const dataSource = "continuous" as const;
   const last = bars.at(-1) ?? null;
@@ -114,19 +124,27 @@ export default function App() {
     if (!symbol) return;
     const cached = timeframesBySymbol[symbol];
     if (cached) {
-      setTimeframe((current) =>
-        current && cached.includes(current) ? current : cached[0] ?? ""
-      );
+        setTimeframe((current) => {
+          if (current && cached.includes(current)) return current;
+          if (customModeRef.current) return current;
+          if (current && isValidTimeframeSpec(current)) return current;
+          return cached[0] ?? "";
+        });
       return;
     }
     let cancelled = false;
     fetchTimeframes(symbol)
-      .then((frames) => {
+      .then(({ timeframes: frames, custom }) => {
         if (cancelled) return;
         setTimeframesBySymbol((prev) => ({ ...prev, [symbol]: frames }));
-        setTimeframe((current) =>
-          current && frames.includes(current) ? current : frames[0] ?? ""
-        );
+        setCustomAvailableBySymbol((prev) => ({ ...prev, [symbol]: custom }));
+        if (!frames.length && custom) setCustomMode(true);
+        setTimeframe((current) => {
+          if (current && frames.includes(current)) return current;
+          if (customModeRef.current) return current;
+          if (current && isValidTimeframeSpec(current)) return current;
+          return frames[0] ?? "";
+        });
       })
       .catch((err) => {
         if (cancelled) return;
@@ -146,6 +164,7 @@ export default function App() {
     ) => {
       if (!nextSymbol || !nextTf) return;
       const requestId = ++requestRef.current;
+      busyRef.current = true;
       setBusy(true);
       try {
         const data = await streamChart(
@@ -162,6 +181,7 @@ export default function App() {
         setUpdated(data.updated);
         setLoadedAt(data.loaded_at);
         setSource(data.source);
+        setChartPath(data.path);
         setStatus("live");
         setError(null);
       } catch (err) {
@@ -176,6 +196,7 @@ export default function App() {
         }
       } finally {
         if (requestId === requestRef.current) {
+          busyRef.current = false;
           setBusy(false);
           setChartProgress(null);
           setApplyingGma(false);
@@ -212,7 +233,8 @@ export default function App() {
         };
         if (
           payload.type === "update" &&
-          payload.fingerprint !== fingerprintRef.current
+          payload.fingerprint !== fingerprintRef.current &&
+          !busyRef.current
         ) {
           loadChart(true).catch(() => undefined);
         }
@@ -229,6 +251,7 @@ export default function App() {
       fetchMeta(symbol, effectiveTf, dataSource)
         .then((meta) => {
           if (
+            !busyRef.current &&
             meta.fingerprint &&
             meta.fingerprint !== fingerprintRef.current
           ) {
@@ -272,6 +295,20 @@ export default function App() {
     setGmaApplied(false);
     setOptimizationProgress(null);
     setOptimizationResult(null);
+  };
+
+  const applyCustomTimeframe = () => {
+    const spec = normalizeTimeframeSpec(customDraft);
+    if (!isValidTimeframeSpec(spec)) {
+      setError("Custom timeframe must look like 37t, 5m, or 1h");
+      return;
+    }
+    cancelInFlightOptimization();
+    resetSeriesControls();
+    setCustomDraft(spec);
+    setCustomMode(!timeframes.includes(spec));
+    setTimeframe(spec);
+    setError(null);
   };
 
   // Drop in-flight GMA / cross-timeframe workers when the series identity
@@ -471,6 +508,8 @@ export default function App() {
               cancelInFlightOptimization();
               setSymbol(e.target.value);
               setTimeframe("");
+              setCustomMode(false);
+              setCustomDraft("");
               resetSeriesControls();
             }}
             disabled={locked || !symbols.length}
@@ -486,17 +525,34 @@ export default function App() {
         <label className="field">
           <span>Timeframe</span>
           <select
-            value={timeframe}
+            value={
+              timeframesLoading
+                ? ""
+                : customSelectActive
+                  ? CUSTOM_TIMEFRAME
+                  : timeframe
+            }
             onChange={(e) => {
               cancelInFlightOptimization();
-              setTimeframe(e.target.value);
               resetSeriesControls();
+              const value = e.target.value;
+              if (value === CUSTOM_TIMEFRAME) {
+                setCustomMode(true);
+                setTimeframe("");
+                return;
+              }
+              setCustomMode(false);
+              setTimeframe(value);
             }}
-            disabled={locked || timeframesLoading || !timeframes.length}
+            disabled={
+              locked ||
+              timeframesLoading ||
+              (!timeframes.length && !customAvailable)
+            }
           >
             {timeframesLoading ? (
               <option value="">Loading timeframes…</option>
-            ) : timeframes.length === 0 ? (
+            ) : !timeframes.length && !customAvailable ? (
               <option value="">No timeframes</option>
             ) : (
               <>
@@ -506,10 +562,50 @@ export default function App() {
                     {item}
                   </option>
                 ))}
+                {(customAvailable || customSelectActive) && (
+                  <option value={CUSTOM_TIMEFRAME}>
+                    {customSelectActive && timeframe
+                      ? `Custom (${timeframe})`
+                      : "Custom…"}
+                  </option>
+                )}
               </>
             )}
           </select>
         </label>
+        {customSelectActive && (
+          <label className="field custom-tf">
+            <span>Spec from es.csv</span>
+            <span className="custom-tf-row">
+              <input
+                type="text"
+                value={customDraft}
+                placeholder="37t, 5m, 1h"
+                spellCheck={false}
+                disabled={locked || busy}
+                onChange={(e) => setCustomDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    applyCustomTimeframe();
+                  }
+                }}
+              />
+              <button
+                className="refresh"
+                type="button"
+                onClick={applyCustomTimeframe}
+                disabled={
+                  locked ||
+                  busy ||
+                  !isValidTimeframeSpec(customDraft)
+                }
+              >
+                Load
+              </button>
+            </span>
+          </label>
+        )}
         <button
           className="refresh"
           type="button"
@@ -1153,7 +1249,11 @@ export default function App() {
 
       <footer className="status">
         <span>
-          {source === "continuous" ? "Continuous timeframe CSV" : ""}
+          {source === "continuous"
+            ? chartPath.includes("→")
+              ? `Aggregated ${effectiveTf} from es.csv`
+              : "Continuous timeframe CSV"
+            : ""}
         </span>
         <span>Object updated {formatClock(updated, chartZone)}</span>
         <span>Cached {formatClock(loadedAt, chartZone)}</span>

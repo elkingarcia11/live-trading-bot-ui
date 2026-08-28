@@ -89,7 +89,8 @@ body {
 
 select,
 button,
-input[type="number"] {
+input[type="number"],
+input[type="text"] {
   background: #0b1016;
   color: var(--text);
   border: 1px solid var(--line);
@@ -101,6 +102,17 @@ input[type="number"] {
 
 select {
   min-width: 120px;
+}
+
+.custom-tf-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.custom-tf-row input {
+  width: 108px;
+  min-width: 0;
 }
 
 .optimize {

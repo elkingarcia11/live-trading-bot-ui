@@ -101,6 +101,27 @@ export function clampGmaParams(params: GmaParams): GmaParams {
   };
 }
 
+const TF_SPEC_RE = /^(\d+)(t|s|m|h)$/i;
+const TF_UNIT_SECONDS: Record<string, number> = { t: 0, s: 1, m: 60, h: 3600 };
+
+/** Sentinel used by the timeframe <select> for the custom-spec path. */
+export const CUSTOM_TIMEFRAME = "__custom__";
+
+/** True for specs the backend parse_spec() accepts (1–100000t, or time ≤ 1 day). */
+export function isValidTimeframeSpec(spec: string): boolean {
+  const match = spec.trim().toLowerCase().match(TF_SPEC_RE);
+  if (!match) return false;
+  const value = Number(match[1]);
+  const unit = match[2].toLowerCase();
+  if (!Number.isFinite(value) || value < 1) return false;
+  if (unit === "t") return value <= 100_000;
+  return value * TF_UNIT_SECONDS[unit] <= 86_400;
+}
+
+export function normalizeTimeframeSpec(spec: string): string {
+  return spec.trim().toLowerCase();
+}
+
 export type OptimizeMetric =
   | "total_win_rate"
   | "call_win_rate"

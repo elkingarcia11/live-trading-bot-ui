@@ -18,6 +18,7 @@ from backend.gcs import (
     OhlcvStore,
     ProgressClock,
     fingerprint,
+    has_continuous_base,
     has_ohlcv,
     list_symbols,
     list_timeframes,
@@ -289,7 +290,11 @@ def symbols() -> dict:
 @app.get("/api/timeframes")
 def timeframes(symbol: str = Query(..., min_length=1)) -> dict:
     try:
-        return {"symbol": symbol, "timeframes": list_timeframes(symbol)}
+        return {
+            "symbol": symbol,
+            "timeframes": list_timeframes(symbol),
+            "custom": has_continuous_base(symbol),
+        }
     except Exception as exc:
         raise HTTPException(
             status_code=502, detail=f"Failed to list timeframes: {exc}") from exc

@@ -14,7 +14,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Callable
 
-from backend.aggregate import aggregate_trades, attach_source_mas
+from backend.aggregate import aggregate_ohlcv, aggregate_trades, attach_source_mas, parse_spec
 import pandas as pd
 import pyarrow.parquet as pq
 from google.api_core.exceptions import NotFound
@@ -81,7 +81,12 @@ def list_trade_symbols() -> list[str]:
 
 def _continuous_symbol_from_name(name: str) -> str | None:
     filename = name.rsplit("/", 1)[-1]
-    if not filename.lower().endswith(".csv") or "_" not in filename:
+    if not filename.lower().endswith(".csv"):
+        return None
+    stem = filename[:-4].lower()
+    if stem == "es":
+        return "ES.FUT"
+    if "_" not in filename:
         return None
     prefix = filename.rsplit("_", 1)[0].lower()
     return "ES.FUT" if prefix == "es" else None
@@ -107,7 +112,11 @@ def list_continuous_timeframes(symbol: str) -> list[str]:
         filename = blob.name.rsplit("/", 1)[-1]
         if not filename.lower().endswith(".csv"):
             continue
-        timeframes.append(filename[3:-4])
+        if filename.lower() == "es.csv" or "_" not in filename:
+            continue
+        spec = filename[3:-4]
+        if spec:
+            timeframes.append(spec)
     return sorted(set(timeframes), key=_timeframe_sort_key)
 
 
@@ -190,6 +199,33 @@ def list_continuous_objects(symbol: str, timeframe: str) -> list[ObjectMeta]:
     return out
 
 
+def list_continuous_base_objects(symbol: str) -> list[ObjectMeta]:
+    if symbol.lower() != "es.fut":
+        return []
+    bucket = _client().bucket(BUCKET_NAME)
+    out = []
+    for blob in bucket.list_blobs(prefix=f"{CONTINUOUS_PREFIX}es"):
+        filename = blob.name.rsplit("/", 1)[-1]
+        if filename.lower() != "es.csv":
+            continue
+        updated = blob.updated
+        if updated is not None and updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        out.append(
+            ObjectMeta(
+                name=blob.name,
+                generation=str(blob.generation),
+                updated=updated or datetime.now(timezone.utc),
+                size=int(blob.size or 0),
+            )
+        )
+    return out
+
+
+def has_continuous_base(symbol: str) -> bool:
+    return bool(list_continuous_base_objects(symbol))
+
+
 def _parse_csv_timestamp(values: pd.Series) -> pd.Series:
     if pd.api.types.is_numeric_dtype(values):
         numeric = values.dropna().abs()
@@ -223,13 +259,11 @@ def _normalize_continuous_csv(frame: pd.DataFrame, name: str) -> pd.DataFrame:
     ]
 
 
-def load_continuous(
-    symbol: str,
-    timeframe: str,
+def _load_continuous_objects(
+    objects: list[ObjectMeta],
     on_file: Callable[[int, int, str], None] | None = None,
     on_bytes: Callable[[int, int, str], None] | None = None,
 ) -> tuple[pd.DataFrame, str, datetime | None]:
-    objects = list_continuous_objects(symbol, timeframe)
     if not objects:
         return pd.DataFrame(
             columns=["timestamp", "open", "high", "low", "close", "volume"]
@@ -253,6 +287,69 @@ def load_continuous(
     return frame, f"{obj.name}:{obj.generation}", obj.updated
 
 
+def load_continuous(
+    symbol: str,
+    timeframe: str,
+    on_file: Callable[[int, int, str], None] | None = None,
+    on_bytes: Callable[[int, int, str], None] | None = None,
+) -> tuple[pd.DataFrame, str, datetime | None]:
+    return _load_continuous_objects(
+        list_continuous_objects(symbol, timeframe),
+        on_file=on_file,
+        on_bytes=on_bytes,
+    )
+
+
+def load_continuous_base(
+    symbol: str,
+    on_file: Callable[[int, int, str], None] | None = None,
+    on_bytes: Callable[[int, int, str], None] | None = None,
+) -> tuple[pd.DataFrame, str, datetime | None]:
+    objects = list_continuous_base_objects(symbol)
+    if not objects:
+        return pd.DataFrame(
+            columns=["timestamp", "price", "size"]
+        ), "", None
+    bucket = _client().bucket(BUCKET_NAME)
+    obj = objects[0]
+    if on_file is not None:
+        on_file(0, 1, obj.name)
+    total = max(int(obj.size or 0), 0)
+    raw = _chunked_download(
+        bucket.blob(obj.name),
+        on_delta=(lambda done: on_bytes(done, total, obj.name))
+        if on_bytes is not None
+        else None,
+        refresh_blob=lambda: bucket.blob(obj.name),
+    )
+    frame = pd.read_csv(io.BytesIO(raw))
+    frame = _normalize_continuous_source(frame, obj.name)
+    if on_file is not None:
+        on_file(1, 1, obj.name)
+    return frame, f"{obj.name}:{obj.generation}", obj.updated
+
+
+def _normalize_continuous_source(frame: pd.DataFrame, name: str) -> pd.DataFrame:
+    """Accept either OHLCV bars or tick rows (timestamp + price)."""
+    frame.columns = [str(column).lower() for column in frame.columns]
+    if {"open", "high", "low", "close"}.issubset(frame.columns):
+        return _normalize_continuous_csv(frame, name)
+    if "timestamp" not in frame.columns or "price" not in frame.columns:
+        raise ValueError(
+            f"{name} must include open/high/low/close or timestamp and price"
+        )
+    frame["timestamp"] = _parse_csv_timestamp(frame["timestamp"])
+    frame["price"] = pd.to_numeric(frame["price"], errors="coerce")
+    if "size" in frame.columns:
+        frame["size"] = pd.to_numeric(frame["size"], errors="coerce")
+    elif "volume" in frame.columns:
+        frame["size"] = pd.to_numeric(frame["volume"], errors="coerce")
+    keep = [column for column in ("timestamp", "price", "size", "action") if column in frame.columns]
+    return frame.dropna(subset=["timestamp", "price"]).sort_values(
+        "timestamp"
+    ).reset_index(drop=True)[keep]
+
+
 def has_ohlcv(symbol: str, timeframe: str) -> bool:
     return bool(list_parquet_objects(symbol, timeframe))
 
@@ -260,6 +357,8 @@ def has_ohlcv(symbol: str, timeframe: str) -> bool:
 def fingerprint(symbol: str, timeframe: str, source: str | None = None) -> str:
     if source == "continuous":
         objects = list_continuous_objects(symbol, timeframe)
+        if not objects:
+            objects = list_continuous_base_objects(symbol)
     else:
         use_trades = source == "trades" or (
             source != "ohlcv" and not has_ohlcv(symbol, timeframe))
@@ -536,6 +635,8 @@ class OhlcvStore:
     _agg: dict[tuple[str, str], CacheEntry] = field(default_factory=dict)
     _continuous: dict[tuple[str, str], CacheEntry] = field(
         default_factory=dict)
+    _continuous_base: dict[str, CacheEntry] = field(default_factory=dict)
+    _continuous_base_locks: dict[str, Lock] = field(default_factory=dict)
 
     def get(
         self,
@@ -599,19 +700,135 @@ class OhlcvStore:
         frame, fp, updated = load_continuous(
             symbol, timeframe, on_file=on_file, on_bytes=on_bytes
         )
-        if frame.empty:
-            raise FileNotFoundError(
-                f"No continuous_data/{symbol}_{timeframe}.csv")
+        if not frame.empty:
+            if progress is not None:
+                progress.emit(
+                    78, f"Loaded {len(frame):,} {timeframe} bars", stage="prepare")
+            entry = CacheEntry(
+                frame=frame,
+                fingerprint=fp,
+                updated=updated,
+                loaded_at=datetime.now(timezone.utc),
+                source="continuous",
+                path=f"{CONTINUOUS_PREFIX}es_{timeframe}.csv",
+            )
+            with self._lock:
+                self._continuous[key] = entry
+            return entry
+        return self._aggregate_continuous(symbol, timeframe, refresh, progress)
+
+    def _base_lock(self, symbol: str) -> Lock:
+        with self._lock:
+            lock = self._continuous_base_locks.get(symbol)
+            if lock is None:
+                lock = Lock()
+                self._continuous_base_locks[symbol] = lock
+            return lock
+
+    def _get_continuous_base(
+        self,
+        symbol: str,
+        refresh: bool,
+        progress: ProgressClock | None = None,
+    ) -> CacheEntry:
+        with self._base_lock(symbol):
+            with self._lock:
+                cached = self._continuous_base.get(symbol)
+            if cached is not None:
+                if not refresh:
+                    if progress is not None:
+                        progress.emit(
+                            46,
+                            f"Using cached es.csv ({len(cached.frame):,} bars)",
+                            stage="cache",
+                        )
+                    return cached
+                objects = list_continuous_base_objects(symbol)
+                current_fp = "|".join(
+                    f"{item.name}:{item.generation}" for item in objects
+                )
+                if current_fp and current_fp == cached.fingerprint:
+                    if progress is not None:
+                        progress.emit(
+                            46,
+                            f"Using cached es.csv ({len(cached.frame):,} bars)",
+                            stage="cache",
+                        )
+                    return cached
+            if progress is not None:
+                progress.emit(5, "Reading continuous_data/es.csv", stage="lookup")
+            on_file, on_bytes = _download_callbacks(
+                progress, 8.0, 38.0, prefix="Downloading "
+            )
+            frame, fp, updated = load_continuous_base(
+                symbol, on_file=on_file, on_bytes=on_bytes
+            )
+            if frame.empty:
+                raise FileNotFoundError(f"No continuous_data/es.csv for {symbol}")
+            if progress is not None:
+                progress.emit(
+                    48, f"Loaded {len(frame):,} es.csv bars", stage="prepare")
+            entry = CacheEntry(
+                frame=frame,
+                fingerprint=fp,
+                updated=updated,
+                loaded_at=datetime.now(timezone.utc),
+                source="continuous",
+                path=f"{CONTINUOUS_PREFIX}es.csv",
+            )
+            with self._lock:
+                self._continuous_base[symbol] = entry
+            return entry
+
+    def _aggregate_continuous(
+        self,
+        symbol: str,
+        timeframe: str,
+        refresh: bool,
+        progress: ProgressClock | None = None,
+    ) -> CacheEntry:
+        parse_spec(timeframe)
+        base = self._get_continuous_base(symbol, refresh, progress)
+        key = (symbol, timeframe)
+        with self._lock:
+            cached = self._continuous.get(key)
+        if cached is not None and cached.fingerprint == base.fingerprint:
+            if progress is not None:
+                progress.emit(
+                    75,
+                    f"Using cached {timeframe} aggregate ({len(cached.frame):,} bars)",
+                    stage="cache",
+                )
+            return cached
+
+        def on_agg(message: str, frac: float) -> None:
+            if progress is not None:
+                progress.emit(50 + 28 * frac, message, stage="aggregate")
+
         if progress is not None:
             progress.emit(
-                78, f"Loaded {len(frame):,} {timeframe} bars", stage="prepare")
+                50,
+                f"Aggregating es.csv ({len(base.frame):,} rows) to {timeframe}",
+                stage="aggregate",
+            )
+        if {"open", "high", "low", "close"}.issubset(base.frame.columns):
+            frame = aggregate_ohlcv(base.frame, timeframe, on_progress=on_agg)
+        else:
+            frame = aggregate_trades(base.frame, timeframe, on_progress=on_agg)
+        if frame.empty:
+            raise FileNotFoundError(
+                f"No bars after aggregating continuous_data/es.csv to {timeframe}"
+            )
+        if progress is not None:
+            progress.emit(
+                80, f"Built {len(frame):,} {timeframe} bars from es.csv", stage="aggregate")
         entry = CacheEntry(
             frame=frame,
-            fingerprint=fp,
-            updated=updated,
+            fingerprint=base.fingerprint,
+            updated=base.updated,
             loaded_at=datetime.now(timezone.utc),
             source="continuous",
-            path=f"{CONTINUOUS_PREFIX}es_{timeframe}.csv",
+            path=f"{CONTINUOUS_PREFIX}es.csv → {timeframe}",
         )
         with self._lock:
             self._continuous[key] = entry
