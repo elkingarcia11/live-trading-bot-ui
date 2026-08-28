@@ -110,6 +110,7 @@ export type OptimizeMetric =
   | "put_profit_pct"
   | "max_runup_pct"
   | "avg_max_runup_pct"
+  | "average_profit_pct"
   | "label_score";
 
 export const OPTIMIZE_OPTIONS: { id: OptimizeMetric; label: string }[] = [
@@ -121,6 +122,7 @@ export const OPTIMIZE_OPTIONS: { id: OptimizeMetric; label: string }[] = [
   { id: "put_profit_pct", label: "Maximize short profit %" },
   { id: "max_runup_pct", label: "Maximize max run-up %" },
   { id: "avg_max_runup_pct", label: "Maximize average max run-up %" },
+  { id: "average_profit_pct", label: "Maximize average profit %" },
   { id: "label_score", label: "Maximize label score" },
 ];
 
@@ -131,6 +133,7 @@ export const CROSS_TF_OPTIMIZE_OPTIONS: {
 }[] = [
   { id: "total_win_rate", label: "Win rate" },
   { id: "total_profit_pct", label: "Total profit %" },
+  { id: "average_profit_pct", label: "Avg profit %" },
   { id: "avg_max_runup_pct", label: "Avg max run-up %" },
   { id: "max_runup_pct", label: "Max run-up %" },
 ];

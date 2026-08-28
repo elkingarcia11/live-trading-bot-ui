@@ -51,6 +51,7 @@ class Trial:
     bars: int
     max_runup_pct: float
     avg_max_runup_pct: float
+    average_profit_pct: float
 
 
 METRICS = {
@@ -62,6 +63,7 @@ METRICS = {
     "put_profit_pct",
     "max_runup_pct",
     "avg_max_runup_pct",
+    "average_profit_pct",
 }
 
 
@@ -458,6 +460,7 @@ def params_equity_stats(
         bars=int(series.close.size),
         max_runup_pct=0.0,
         avg_max_runup_pct=0.0,
+        average_profit_pct=0.0,
     )
     return trial_equity_stats(series, dummy)
 
@@ -484,9 +487,15 @@ def _metric_value(trial: Trial, metric: str) -> tuple[float, float, int]:
             profit_pct,
             trial.closed,
         )
-    # avg_max_runup_pct
+    if metric == "avg_max_runup_pct":
+        return (
+            round(trial.avg_max_runup_pct, 4),
+            profit_pct,
+            trial.closed,
+        )
+    # average_profit_pct
     return (
-        round(trial.avg_max_runup_pct, 4),
+        round(trial.average_profit_pct, 4),
         profit_pct,
         trial.closed,
     )
@@ -764,6 +773,7 @@ def _record_trial(
     put_wins: int,
     max_runup_pct: float = 0.0,
     avg_max_runup_pct: float = 0.0,
+    average_profit_pct: float = 0.0,
 ) -> Trial:
     return Trial(
         timeframe=timeframe,
@@ -789,6 +799,7 @@ def _record_trial(
         bars=n,
         max_runup_pct=max_runup_pct,
         avg_max_runup_pct=avg_max_runup_pct,
+        average_profit_pct=average_profit_pct,
     )
 
 
@@ -892,6 +903,7 @@ def _search_from_sources(
                 put_wins,
                 trial_stats["max_runup_pct"],
                 trial_stats["avg_max_runup_pct"],
+                trial_stats["average_profit_pct"],
             )
             rows.append(
                 trial_row(
@@ -911,6 +923,7 @@ def _search_from_sources(
                     trial.close_puts,
                     trial_stats["max_drawdown_pct"],
                     trial_stats["max_runup_pct"],
+                    trial_stats["avg_max_runup_pct"],
                     trial_stats["average_profit_pct"],
                 )
             )
@@ -969,6 +982,7 @@ def _search_fast_group(
             ) = score_events(close, buy_idx, sell_idx, flatten_idx)
             if not _enough_trades(metric, n_calls, n_puts, closed):
                 continue
+            profit_pct_val = call_p + put_p
             trial = Trial(
                 timeframe=timeframe,
                 fast_length=flen,
@@ -981,7 +995,7 @@ def _search_fast_group(
                 profit=call_pts + put_pts,
                 call_profit=call_pts,
                 put_profit=put_pts,
-                profit_pct=call_p + put_p,
+                profit_pct=profit_pct_val,
                 call_profit_pct=call_p,
                 put_profit_pct=put_p,
                 close_calls=n_calls,
@@ -994,6 +1008,7 @@ def _search_fast_group(
                 bars=n,
                 max_runup_pct=0.0,
                 avg_max_runup_pct=0.0,
+                average_profit_pct=profit_pct_val / closed if closed else 0.0,
             )
             if _better(metric, trial, best):
                 best = trial
@@ -1253,6 +1268,7 @@ def optimize(
                     },
                     "win_rate": round(best.win_rate, 2),
                     "profit_pct": round(best.profit_pct, 4),
+                    "average_profit_pct": round(best.average_profit_pct, 4),
                     "max_runup_pct": round(best.max_runup_pct, 4),
                     "avg_max_runup_pct": round(best.avg_max_runup_pct, 4),
                     "closed_trades": best.closed,

@@ -223,11 +223,20 @@ select {
 }
 
 .gma-optimizer .optimizer-feature {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
   margin-bottom: 10px;
+}
+
+.sidebar .gma-optimizer label.optimizer-feature,
+.sidebar .gma-optimizer .trade-filter label {
+  display: grid;
+  grid-template-columns: minmax(52px, auto) 1fr;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .trade-filter {
@@ -238,13 +247,7 @@ select {
 }
 
 .trade-filter label {
-  display: flex;
-  flex-direction: column;
   gap: 4px;
-  color: var(--muted);
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
 }
 
 .trade-filter input {
@@ -258,13 +261,36 @@ select {
 }
 
 .gma-optimizer select,
-.gma-optimizer > .optimize {
+.gma-optimizer .trade-filter input,
+.gma-optimizer .optimizer-actions {
   width: 100%;
   min-width: 0;
 }
 
-.gma-optimizer > .optimize {
+.gma-optimizer .optimizer-actions {
+  display: flex;
+  gap: 8px;
   margin-top: 12px;
+}
+
+.gma-optimizer .optimizer-actions > .optimize {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.gma-optimizer .optimizer-actions > .cancel-optimize {
+  flex: 0 0 auto;
+}
+
+.cancel-optimize {
+  background: #2a1518;
+  border-color: #5a2a32;
+  color: #ff8a90;
+}
+
+.cancel-optimize:hover:not(:disabled) {
+  border-color: var(--sell);
+  color: #ffb0b4;
 }
 
 .optimizer-result {
@@ -1061,14 +1087,14 @@ input:disabled {
 
 .manual-list li {
   display: grid;
-  grid-template-columns: 34px 1fr auto 20px;
-  gap: 8px;
+  grid-template-columns: 28px minmax(0, 1fr) 22px;
+  gap: 6px;
   align-items: center;
-  padding: 4px 8px;
+  padding: 4px 6px 4px 8px;
   border-bottom: 1px solid var(--line);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
-  min-width: 300px;
+  min-width: 0;
 }
 
 .manual-list li:last-child {
@@ -1090,25 +1116,32 @@ input:disabled {
 }
 
 .manual-time {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text);
 }
 
-.manual-bar {
-  color: var(--muted);
-  text-align: right;
-}
-
 .manual-remove {
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--sell);
+  font-size: 16px;
+  font-weight: 600;
   line-height: 1;
-  font-size: 14px;
   cursor: pointer;
-  color: var(--muted);
 }
 
 .manual-remove:hover:not(:disabled) {
-  color: var(--sell);
-  border-color: var(--sell);
+  background: rgba(255, 82, 82, 0.16);
+  color: #ff6b6b;
+}
+
+.manual-remove:disabled {
+  opacity: 0.4;
+  cursor: default;
 }

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Chart, { CHART_ZONES, formatChartTime, type ChartHandle, type ChartZone } from "./Chart";
 import { fetchCatalog, fetchChart, fetchMeta, fetchTimeframes, streamChart, watchUrl } from "./api";
-import { runFrontendOptimization, runMultiTimeframeOptimization, type CrossTfProgress, type CrossTfResult, type LabelScoringOptions } from "./gmaOptimizer";
+import { isOptimizationAbort, runFrontendOptimization, runMultiTimeframeOptimization, type CrossTfProgress, type CrossTfResult, type LabelScoringOptions } from "./gmaOptimizer";
 import { CROSS_TF_OPTIMIZE_OPTIONS, DEFAULT_MANUAL_WINDOW, DEFAULT_PARAMS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_SIGMA_MAX, GMA_SIGMA_MIN, clampGmaParams, gmaScale, isValidGmaPair, OPTIMIZE_OPTIONS, type Bar, type GmaParams, type LoadProgress, type ManualEntryWindow, type ManualPoint, type ManualSelectionMode, type OptimizeMetric, type OptimizeProgress, type OptimizeResult } from "./types";
 
 import { computeTradeStats, formatActions, formatPct, formatPoints, formatWinRateLine, isUpAction, withActions } from "./tradeStats";
@@ -32,6 +32,7 @@ function optimizationScore(result: OptimizeResult, metric: OptimizeMetric): stri
     put_profit_pct: result.put_profit_pct,
     max_runup_pct: result.max_runup_pct,
     avg_max_runup_pct: result.avg_max_runup_pct,
+    average_profit_pct: result.average_profit_pct,
   }[metric];
   return value == null ? "—" : `${value.toFixed(metric.includes("win_rate") ? 1 : 2)}%`;
 }
@@ -77,6 +78,8 @@ export default function App() {
   const paramsRef = useRef(params);
   const requestRef = useRef(0);
   const chartHandleRef = useRef<ChartHandle | null>(null);
+  const gmaOptAbortRef = useRef<AbortController | null>(null);
+  const crossTfAbortRef = useRef<AbortController | null>(null);
   paramsRef.current = params;
   const locked = false;
 
@@ -240,6 +243,29 @@ export default function App() {
     };
   }, [symbol, effectiveTf, dataSource, loadChart, locked]);
 
+  const cancelGmaOptimize = useCallback(() => {
+    const controller = gmaOptAbortRef.current;
+    if (!controller) return;
+    gmaOptAbortRef.current = null;
+    controller.abort();
+    setOptimizing(false);
+    setOptimizationProgress(null);
+  }, []);
+
+  const cancelCrossTfOptimize = useCallback(() => {
+    const controller = crossTfAbortRef.current;
+    if (!controller) return;
+    crossTfAbortRef.current = null;
+    controller.abort();
+    setCrossTfOptimizing(false);
+    setCrossTfProgress(null);
+  }, []);
+
+  const cancelInFlightOptimization = useCallback(() => {
+    cancelGmaOptimize();
+    cancelCrossTfOptimize();
+  }, [cancelGmaOptimize, cancelCrossTfOptimize]);
+
   const resetSeriesControls = () => {
     setDraft(DEFAULT_PARAMS);
     setParams(DEFAULT_PARAMS);
@@ -247,6 +273,14 @@ export default function App() {
     setOptimizationProgress(null);
     setOptimizationResult(null);
   };
+
+  // Drop in-flight GMA / cross-timeframe workers when the series identity
+  // changes so a stale result cannot land on the newly selected chart.
+  useEffect(() => {
+    return () => {
+      cancelInFlightOptimization();
+    };
+  }, [symbol, effectiveTf, cancelInFlightOptimization]);
 
   /** Toggle a manual entry/exit point on or off, keeping the list sorted by time. */
   const toggleManualPoint = (
@@ -319,6 +353,9 @@ export default function App() {
 
   const optimizeGmas = async () => {
     if (locked || !symbol || !effectiveTf || busy || optimizing) return;
+    gmaOptAbortRef.current?.abort();
+    const controller = new AbortController();
+    gmaOptAbortRef.current = controller;
     setOptimizing(true);
     setOptimizationProgress(null);
     setOptimizationResult(null);
@@ -333,13 +370,19 @@ export default function App() {
         maxTrades,
         (progress) => setOptimizationProgress(progress),
         labelScoring,
+        controller.signal,
       );
+      if (gmaOptAbortRef.current !== controller) return;
       setOptimizationResult(result);
     } catch (err) {
+      if (isOptimizationAbort(err) || gmaOptAbortRef.current !== controller) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setOptimizing(false);
-      setOptimizationProgress(null);
+      if (gmaOptAbortRef.current === controller) {
+        gmaOptAbortRef.current = null;
+        setOptimizing(false);
+        setOptimizationProgress(null);
+      }
     }
   };
 
@@ -360,6 +403,9 @@ export default function App() {
 
   const optimizeCrossTimeframes = async () => {
     if (locked || !symbol || !timeframes.length || crossTfOptimizing) return;
+    crossTfAbortRef.current?.abort();
+    const controller = new AbortController();
+    crossTfAbortRef.current = controller;
     setCrossTfOptimizing(true);
     setCrossTfProgress(null);
     setCrossTfResult(null);
@@ -367,7 +413,7 @@ export default function App() {
     try {
       const series = await Promise.all(
         timeframes.map(async (tf) => {
-          const data = await fetchChart(symbol, tf, dataSource);
+          const data = await fetchChart(symbol, tf, dataSource, controller.signal);
           return { timeframe: tf, bars: data.bars };
         }),
       );
@@ -379,13 +425,19 @@ export default function App() {
         maxTrades,
         (progress) => setCrossTfProgress(progress),
         labelScoring,
+        controller.signal,
       );
+      if (crossTfAbortRef.current !== controller) return;
       setCrossTfResult(result);
     } catch (err) {
+      if (isOptimizationAbort(err) || crossTfAbortRef.current !== controller) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setCrossTfOptimizing(false);
-      setCrossTfProgress(null);
+      if (crossTfAbortRef.current === controller) {
+        crossTfAbortRef.current = null;
+        setCrossTfOptimizing(false);
+        setCrossTfProgress(null);
+      }
     }
   };
 
@@ -416,6 +468,7 @@ export default function App() {
           <select
             value={symbol}
             onChange={(e) => {
+              cancelInFlightOptimization();
               setSymbol(e.target.value);
               setTimeframe("");
               resetSeriesControls();
@@ -435,6 +488,7 @@ export default function App() {
           <select
             value={timeframe}
             onChange={(e) => {
+              cancelInFlightOptimization();
               setTimeframe(e.target.value);
               resetSeriesControls();
             }}
@@ -642,34 +696,40 @@ export default function App() {
               />
             </label>
           </div>
-          <button
-            type="button"
-            className="optimize"
-            disabled={
-              locked ||
-              busy ||
-              optimizing ||
-              !symbol ||
-              !effectiveTf ||
-              (optimizationFeature === "label_score" && !hasManualLabels)
-            }
-            onClick={optimizeGmas}
-          >
-            {optimizing
-              ? optimizationProgress
-                ? `Optimizing ${Math.round(optimizationProgress.pct)}%`
-                : "Starting optimization…"
-              : "Optimize GMAs"}
-          </button>
+          <div className="optimizer-actions">
+            <button
+              type="button"
+              className="optimize"
+              disabled={
+                locked ||
+                busy ||
+                optimizing ||
+                !symbol ||
+                !effectiveTf ||
+                (optimizationFeature === "label_score" && !hasManualLabels)
+              }
+              onClick={optimizeGmas}
+            >
+              {optimizing
+                ? optimizationProgress
+                  ? `Optimizing ${Math.round(optimizationProgress.pct)}%`
+                  : "Starting optimization…"
+                : "Optimize GMAs"}
+            </button>
+            {optimizing && (
+              <button
+                type="button"
+                className="optimize cancel-optimize"
+                onClick={cancelGmaOptimize}
+              >
+                Cancel
+              </button>
+            )}
+          </div>
           {optimizationFeature === "label_score" && !hasManualLabels && (
             <p className="hint optimizer-status">
               Select entry/exit points in Manual Optimization first — the label
               score needs ground-truth bars to optimize against.
-            </p>
-          )}
-          {optimizationProgress && (
-            <p className="hint optimizer-status">
-              {optimizationProgress.message}
             </p>
           )}
           {optimizationResult && (
@@ -803,16 +863,16 @@ export default function App() {
             ) : (
               <ul className="manual-list">
                 {entryPoints.map((point, k) => (
-                  <li key={`${point.index}-${point.time}`}>
+                  <li key={`${point.index}-${point.time}`} title={`bar ${point.index}`}>
                     <span className="manual-kind entry">E{k + 1}</span>
                     <span className="manual-time">
                       {formatChartTime(point.time, chartZone, true)}
                     </span>
-                    <span className="manual-bar">bar {point.index}</span>
                     <button
                       type="button"
                       className="manual-remove"
                       aria-label={`Remove entry ${k + 1}`}
+                      disabled={busy}
                       onClick={() =>
                         removeManualPoint("entry", point.index, point.time)
                       }
@@ -842,16 +902,16 @@ export default function App() {
             ) : (
               <ul className="manual-list">
                 {exitPoints.map((point, k) => (
-                  <li key={`${point.index}-${point.time}`}>
+                  <li key={`${point.index}-${point.time}`} title={`bar ${point.index}`}>
                     <span className="manual-kind exit">X{k + 1}</span>
                     <span className="manual-time">
                       {formatChartTime(point.time, chartZone, true)}
                     </span>
-                    <span className="manual-bar">bar {point.index}</span>
                     <button
                       type="button"
                       className="manual-remove"
-                      aria-label={`Remove X${k + 1}`}
+                      aria-label={`Remove exit ${k + 1}`}
+                      disabled={busy}
                       onClick={() =>
                         removeManualPoint("exit", point.index, point.time)
                       }
@@ -1027,6 +1087,15 @@ export default function App() {
                 : "Loading timeframes…"
               : "Optimize All Timeframes"}
           </button>
+          {crossTfOptimizing && (
+            <button
+              type="button"
+              className="optimize cancel-optimize"
+              onClick={cancelCrossTfOptimize}
+            >
+              Cancel
+            </button>
+          )}
           {crossTfProgress && (
             <span className="cross-tf-status">
               {crossTfProgress.timeframesDone.length > 0 &&

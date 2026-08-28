@@ -175,9 +175,10 @@ export function fetchChart(
   symbol: string,
   timeframe: string,
   source: DataSource,
+  signal?: AbortSignal,
 ): Promise<ChartResponse> {
   const q = new URLSearchParams({ symbol, timeframe, source });
-  return fetch(`/api/chart?${q.toString()}`).then((r) =>
+  return fetch(`/api/chart?${q.toString()}`, { signal }).then((r) =>
     readJson<ChartResponse>(r),
   );
 }

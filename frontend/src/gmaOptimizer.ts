@@ -194,7 +194,9 @@ self.onmessage = (event) => {
         : metric === "total_profit_pct" ? stats.profitPct
         : metric === "call_profit_pct" ? stats.longProfitPct
         : metric === "put_profit_pct" ? stats.shortProfitPct
-        : metric === "max_runup_pct" ? stats.maxRunup : stats.avgMaxRunup;
+        : metric === "max_runup_pct" ? stats.maxRunup
+        : metric === "avg_max_runup_pct" ? stats.avgMaxRunup
+        : (stats.closed ? stats.profitPct / stats.closed : 0);
     }
     if (stats.closed >= minT && stats.closed <= maxT && (!best || value > best.value)) best = { value, fastIndex, slowIndex, stats, labelBreakdown };
     if (i % 250 === 0 || i === pairs.length - 1) self.postMessage({ type: "progress", pct: 5 + i / pairs.length * 95, frame: i, frames: pairs.length, tested: i + 1, total: pairs.length, timeframe, message: "Testing GMA parameter pairs" });
@@ -212,6 +214,7 @@ self.onmessage = (event) => {
     closed_trades: s.closed, close_calls: s.longClosed, close_puts: s.shortClosed,
     wins: s.wins, call_wins: s.longWins, put_wins: s.shortWins, bars: close.length, tested: pairs.length,
     max_runup_pct: s.maxRunup, avg_max_runup_pct: s.avgMaxRunup,
+    average_profit_pct: s.closed ? s.profitPct / s.closed : 0,
     label_score: best.labelBreakdown
   }});
 };
@@ -262,6 +265,14 @@ export interface LabelScoringOptions {
   weights?: LabelScoreWeights;
 }
 
+function abortError(): DOMException {
+  return new DOMException("Optimization cancelled", "AbortError");
+}
+
+export function isOptimizationAbort(err: unknown): boolean {
+  return err instanceof Error && err.name === "AbortError";
+}
+
 function runSingleOptimize(
   bars: Bar[],
   symbol: string,
@@ -271,8 +282,13 @@ function runSingleOptimize(
   maxTrades: number | null,
   onProgress: (progress: OptimizeProgress) => void,
   labelScoring?: LabelScoringOptions,
+  signal?: AbortSignal,
 ): Promise<OptimizeResultWithLabelScore> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError());
+      return;
+    }
     const url = URL.createObjectURL(
       new Blob([WORKER_SOURCE], { type: "application/javascript" }),
     );
@@ -281,25 +297,38 @@ function runSingleOptimize(
     const high = new Float64Array(bars.map((bar) => bar.high));
     const low = new Float64Array(bars.map((bar) => bar.low));
     const times = bars.map((bar) => bar.time);
+    let settled = false;
     const cleanup = () => {
+      signal?.removeEventListener("abort", onAbort);
       worker.terminate();
       URL.revokeObjectURL(url);
     };
+    const settle = (action: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      action();
+    };
+    const onAbort = () => settle(() => reject(abortError()));
+    signal?.addEventListener("abort", onAbort, { once: true });
     worker.onmessage = (event: MessageEvent<WorkerProgress | WorkerDone>) => {
       if (event.data.type === "progress") {
-        onProgress({
-          ...event.data,
-          elapsed_s: 0,
-          eta_s: null,
-        });
+        if (!settled) {
+          onProgress({
+            ...event.data,
+            elapsed_s: 0,
+            eta_s: null,
+          });
+        }
       } else {
-        cleanup();
-        resolve(event.data.result);
+        const result = event.data.result;
+        settle(() => resolve(result));
       }
     };
     worker.onerror = (event) => {
-      cleanup();
-      reject(new Error(event.message || "Frontend optimization failed"));
+      settle(() =>
+        reject(new Error(event.message || "Frontend optimization failed")),
+      );
     };
     worker.postMessage(
       {
@@ -330,6 +359,7 @@ export function runFrontendOptimization(
   maxTrades: number | null,
   onProgress: (progress: OptimizeProgress) => void,
   labelScoring?: LabelScoringOptions,
+  signal?: AbortSignal,
 ): Promise<OptimizeResultWithLabelScore> {
   return runSingleOptimize(
     bars,
@@ -340,6 +370,7 @@ export function runFrontendOptimization(
     maxTrades,
     onProgress,
     labelScoring,
+    signal,
   );
 }
 
@@ -369,9 +400,11 @@ export async function runMultiTimeframeOptimization(
   maxTrades: number | null,
   onProgress: (progress: CrossTfProgress) => void,
   labelScoring?: LabelScoringOptions,
+  signal?: AbortSignal,
 ): Promise<CrossTfResult> {
   const total = series.length;
   if (total === 0) throw new Error("No timeframes to optimize");
+  if (signal?.aborted) throw abortError();
 
   // Bounded concurrency: never spawn more workers than we have cores, and
   // never more than the number of timeframes. Fall back to 4 if the browser
@@ -428,6 +461,7 @@ export async function runMultiTimeframeOptimization(
   // each batch before starting the next. This keeps memory bounded and avoids
   // spawning an unbounded number of workers.
   for (let start = 0; start < total; start += concurrency) {
+    if (signal?.aborted) throw abortError();
     const batch = series.slice(start, start + concurrency);
     const results = await Promise.all(
       batch.map(async (entry, offset) => {
@@ -441,6 +475,7 @@ export async function runMultiTimeframeOptimization(
           maxTrades,
           (p) => emitProgress(tfIndex, p),
           labelScoring,
+          signal,
         );
         return { tfIndex, single };
       }),
@@ -470,6 +505,8 @@ function metricScore(
       return result.max_runup_pct ?? Number.NEGATIVE_INFINITY;
     case "avg_max_runup_pct":
       return result.avg_max_runup_pct ?? Number.NEGATIVE_INFINITY;
+    case "average_profit_pct":
+      return result.average_profit_pct ?? Number.NEGATIVE_INFINITY;
     case "label_score":
       return result.label_score?.totalScore ?? Number.NEGATIVE_INFINITY;
     default:

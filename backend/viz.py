@@ -21,6 +21,7 @@ METRIC_FIELDS = (
     "put_profit_pct",
     "max_runup_pct",
     "avg_max_runup_pct",
+    "average_profit_pct",
     "closed",
 )
 PARAM_PAIRS = (
@@ -40,6 +41,7 @@ METRIC_DIGITS = {
     "put_profit_pct": 4,
     "max_runup_pct": 4,
     "avg_max_runup_pct": 4,
+    "average_profit_pct": 4,
     "closed": 0,
 }
 SEARCH_METRIC_FIELD = {
@@ -51,6 +53,7 @@ SEARCH_METRIC_FIELD = {
     "put_profit_pct": "put_profit_pct",
     "max_runup_pct": "max_runup_pct",
     "avg_max_runup_pct": "avg_max_runup_pct",
+    "average_profit_pct": "average_profit_pct",
 }
 
 TOP_N = 40
