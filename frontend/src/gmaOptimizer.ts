@@ -21,8 +21,9 @@ import {
 const WORKER_SOURCE = `
 const LENGTHS = [...Array(29)].map((_, i) => i + 2).concat([...Array(10)].map((_, i) => 32 + i * 2));
 const SIGMAS = [...Array(19)].map((_, i) => (i + 2) * 0.5);
-const MACD_FAST = [...Array(10)].map((_, i) => 2 + i * 2);
-const MACD_SLOW = [...Array(15)].map((_, i) => 22 + i * 2);
+const MACD_FAST = 12;
+const MACD_SLOW = 26;
+const MACD_SIGNAL = 9;
 const ET_FORMAT = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
   hour: "2-digit", minute: "2-digit", hour12: false, hourCycle: "h23"
@@ -271,12 +272,8 @@ function isValidGmaPair(fast, slow) {
   return fast.length >= 2 && slow.length >= 2 && fast.ratio < slow.ratio;
 }
 
-function isValidMacdCombo(fast, slow, signal) {
-  return fast >= 2 && slow >= 2 && signal >= 2 && fast < slow;
-}
-
 self.onmessage = (event) => {
-  const { close, high, low, times, symbol, timeframe, metric, minTrades, maxTrades, labels, labelWindow, labelWeights, requireMacd, searchMacd, macdFast, macdSlow, macdSignal } = event.data;
+  const { close, high, low, times, symbol, timeframe, metric, minTrades, maxTrades, labels, labelWindow, labelWeights, requireMacd } = event.data;
   const minT = Math.max(1, Number.isFinite(minTrades) ? minTrades : 1);
   const maxT = Number.isFinite(maxTrades) ? maxTrades : Infinity;
   const useLabels = metric === "label_score" && labels && (labels.entries.length || labels.exits.length);
@@ -293,47 +290,29 @@ self.onmessage = (event) => {
   for (let fast = 0; fast < grid.length; fast++) for (let slow = 0; slow < grid.length; slow++) {
     if (isValidGmaPair(grid[fast], grid[slow])) pairs.push([fast, slow]);
   }
-  const macdCombos = [];
-  if (requireMacd && searchMacd) {
-    const signal = macdSignal || 9;
-    for (const fast of MACD_FAST) for (const slow of MACD_SLOW) {
-      if (isValidMacdCombo(fast, slow, signal)) macdCombos.push({ fast, slow, signal });
-    }
-  } else if (requireMacd) {
-    const fast = macdFast || 12;
-    const slow = macdSlow || 26;
-    const signal = macdSignal || 9;
-    if (isValidMacdCombo(fast, slow, signal)) macdCombos.push({ fast, slow, signal });
-  } else {
-    macdCombos.push(null);
-  }
-  const totalTrials = pairs.length * macdCombos.length;
+  const macd = requireMacd ? macdLine(close, MACD_FAST, MACD_SLOW) : null;
+  const totalTrials = pairs.length;
   let best = null;
-  let tested = 0;
-  for (const macdCombo of macdCombos) {
-    const macd = macdCombo ? macdLine(close, macdCombo.fast, macdCombo.slow) : null;
-    for (let i = 0; i < pairs.length; i++) {
-      const [fastIndex, slowIndex] = pairs[i];
-      const stats = macd
-        ? scoreMacdTrades(fastGrid[fastIndex], slowGrid[slowIndex], close, high, low, masks, macd)
-        : score(close, high, low, tradeIndices(fastGrid[fastIndex], slowGrid[slowIndex], masks, null));
-      const scored = metricValue(metric, stats, null, useLabels, labels, labelWindow, labelWeights);
-      if (stats.closed >= minT && stats.closed <= maxT && (!best || scored.value > best.value)) {
-        best = { value: scored.value, fastIndex, slowIndex, stats, labelBreakdown: scored.labelBreakdown, macd: macdCombo };
-      }
-      tested++;
-      if (tested % 250 === 0 || tested === totalTrials) {
-        self.postMessage({
-          type: "progress",
-          pct: 5 + tested / totalTrials * 95,
-          frame: tested,
-          frames: totalTrials,
-          tested,
-          total: totalTrials,
-          timeframe,
-          message: requireMacd && searchMacd ? "Testing GMA and MACD parameter pairs" : "Testing GMA parameter pairs",
-        });
-      }
+  for (let i = 0; i < pairs.length; i++) {
+    const [fastIndex, slowIndex] = pairs[i];
+    const stats = macd
+      ? scoreMacdTrades(fastGrid[fastIndex], slowGrid[slowIndex], close, high, low, masks, macd)
+      : score(close, high, low, tradeIndices(fastGrid[fastIndex], slowGrid[slowIndex], masks, null));
+    const scored = metricValue(metric, stats, null, useLabels, labels, labelWindow, labelWeights);
+    if (stats.closed >= minT && stats.closed <= maxT && (!best || scored.value > best.value)) {
+      best = { value: scored.value, fastIndex, slowIndex, stats, labelBreakdown: scored.labelBreakdown };
+    }
+    if (i % 250 === 0 || i === pairs.length - 1) {
+      self.postMessage({
+        type: "progress",
+        pct: 5 + (i + 1) / totalTrials * 95,
+        frame: i,
+        frames: totalTrials,
+        tested: i + 1,
+        total: totalTrials,
+        timeframe,
+        message: "Testing GMA parameter pairs",
+      });
     }
   }
   if (!best) throw new Error("No GMA combination produced enough closed trades");
@@ -341,7 +320,7 @@ self.onmessage = (event) => {
   self.postMessage({ type: "done", result: {
     symbol, timeframe, metric,
     params: { fast_length: grid[best.fastIndex].length, fast_sigma: grid[best.fastIndex].sigma, slow_length: grid[best.slowIndex].length, slow_sigma: grid[best.slowIndex].sigma },
-    macd_params: best.macd ? { fast: best.macd.fast, slow: best.macd.slow, signal: best.macd.signal } : null,
+    macd_params: requireMacd ? { fast: MACD_FAST, slow: MACD_SLOW, signal: MACD_SIGNAL } : null,
     win_rate: s.closed ? s.wins / s.closed * 100 : 0,
     call_win_rate: s.longClosed ? s.longWins / s.longClosed * 100 : null,
     put_win_rate: s.shortClosed ? s.shortWins / s.shortClosed * 100 : null,
@@ -401,10 +380,8 @@ export interface LabelScoringOptions {
   weights?: LabelScoreWeights;
 }
 
-/** When set, entries require GMA side and MACD line sign to agree. */
-export type MacdConfirmOptions =
-  | { mode: "search"; signal: number }
-  | { mode: "fixed"; fast: number; slow: number; signal: number };
+/** When true, score entries with MACD 12/26 confirmation (fixed; not grid-searched). */
+export type MacdConfirmOptions = boolean;
 
 function abortError(): DOMException {
   return new DOMException("Optimization cancelled", "AbortError");
@@ -424,7 +401,7 @@ function runSingleOptimize(
   onProgress: (progress: OptimizeProgress) => void,
   labelScoring?: LabelScoringOptions,
   signal?: AbortSignal,
-  macdConfirm?: MacdConfirmOptions | null,
+  macdConfirm?: MacdConfirmOptions,
 ): Promise<OptimizeResultWithLabelScore> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -487,15 +464,6 @@ function runSingleOptimize(
         labelWindow: labelScoring?.window ?? DEFAULT_LABEL_WINDOW,
         labelWeights: labelScoring?.weights ?? DEFAULT_LABEL_SCORE_WEIGHTS,
         requireMacd: Boolean(macdConfirm),
-        searchMacd: macdConfirm?.mode === "search",
-        macdFast: macdConfirm?.mode === "fixed" ? macdConfirm.fast : 12,
-        macdSlow: macdConfirm?.mode === "fixed" ? macdConfirm.slow : 26,
-        macdSignal:
-          macdConfirm?.mode === "search"
-            ? macdConfirm.signal
-            : macdConfirm?.mode === "fixed"
-              ? macdConfirm.signal
-              : 9,
       },
       [close.buffer, high.buffer, low.buffer],
     );
@@ -512,7 +480,7 @@ export function runFrontendOptimization(
   onProgress: (progress: OptimizeProgress) => void,
   labelScoring?: LabelScoringOptions,
   signal?: AbortSignal,
-  macdConfirm?: MacdConfirmOptions | null,
+  macdConfirm?: MacdConfirmOptions,
 ): Promise<OptimizeResultWithLabelScore> {
   return runSingleOptimize(
     bars,
@@ -555,7 +523,7 @@ export async function runMultiTimeframeOptimization(
   onProgress: (progress: CrossTfProgress) => void,
   labelScoring?: LabelScoringOptions,
   signal?: AbortSignal,
-  macdConfirm?: MacdConfirmOptions | null,
+  macdConfirm?: MacdConfirmOptions,
 ): Promise<CrossTfResult> {
   const total = series.length;
   if (total === 0) throw new Error("No timeframes to optimize");

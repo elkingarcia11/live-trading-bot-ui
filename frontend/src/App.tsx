@@ -451,9 +451,7 @@ export default function App() {
         (progress) => setOptimizationProgress(progress),
         labelScoring,
         controller.signal,
-        optimizeMacdOn
-          ? { mode: "search", signal: macdDraft.signal }
-          : null,
+        optimizeMacdOn,
       );
       if (gmaOptAbortRef.current !== controller) return;
       setOptimizationResult(result);
@@ -477,12 +475,8 @@ export default function App() {
       slowLength: optimizationResult.params.slow_length,
       slowSigma: optimizationResult.params.slow_sigma,
     });
-    if (optimizeMacd && optimizationResult.macd_params) {
-      setMacdDraft({
-        fast: optimizationResult.macd_params.fast,
-        slow: optimizationResult.macd_params.slow,
-        signal: optimizationResult.macd_params.signal,
-      });
+    if (optimizeMacd) {
+      setMacdDraft(DEFAULT_MACD_PARAMS);
     }
     setDraft(best);
     setParams(best);
@@ -519,9 +513,7 @@ export default function App() {
         (progress) => setCrossTfProgress(progress),
         labelScoring,
         controller.signal,
-        optimizeMacdOn
-          ? { mode: "search", signal: macdDraft.signal }
-          : null,
+        optimizeMacdOn,
       );
       if (crossTfAbortRef.current !== controller) return;
       setCrossTfResult(result);
@@ -545,12 +537,8 @@ export default function App() {
       slowLength: crossTfResult.params.slow_length,
       slowSigma: crossTfResult.params.slow_sigma,
     });
-    if (optimizeMacd && crossTfResult.macd_params) {
-      setMacdDraft({
-        fast: crossTfResult.macd_params.fast,
-        slow: crossTfResult.macd_params.slow,
-        signal: crossTfResult.macd_params.signal,
-      });
+    if (optimizeMacd) {
+      setMacdDraft(DEFAULT_MACD_PARAMS);
     }
     setDraft(best);
     setParams(best);
@@ -961,7 +949,7 @@ export default function App() {
           )}
           {optimizeGma && optimizeMacd && (
             <p className="hint">
-              Grid-search GMA pairs (L≥2, fast L/σ &lt; slow L/σ) and MACD fast/slow (≥2, fast &lt; slow). Signal uses sidebar value — not part of the zero-line filter.
+              MACD fixed at 12/26/9 · grid-search valid GMA pairs (L≥2, fast L/σ &lt; slow L/σ)
             </p>
           )}
           {optimizeMacdOn && (
@@ -1058,8 +1046,8 @@ export default function App() {
               <dl className="optimizer-params">
                 <div><dt>Fast GMA</dt><dd>L {optimizationResult.params.fast_length} · σ {optimizationResult.params.fast_sigma.toFixed(1)}</dd></div>
                 <div><dt>Slow GMA</dt><dd>L {optimizationResult.params.slow_length} · σ {optimizationResult.params.slow_sigma.toFixed(1)}</dd></div>
-                {optimizeMacdOn && optimizationResult.macd_params && (
-                  <div><dt>MACD</dt><dd>{optimizationResult.macd_params.fast} / {optimizationResult.macd_params.slow} / {optimizationResult.macd_params.signal}</dd></div>
+                {optimizeMacdOn && (
+                  <div><dt>MACD</dt><dd>12 / 26 / 9 (fixed)</dd></div>
                 )}
               </dl>
               {optimizationFeature === "label_score" &&
