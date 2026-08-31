@@ -3,7 +3,7 @@ import Chart, { CHART_ZONES, formatChartTime, type ChartHandle, type ChartZone }
 import { fetchCatalog, fetchChart, fetchMeta, fetchTimeframes, streamChart, watchUrl } from "./api";
 import { isOptimizationAbort, runFrontendOptimization, runMultiTimeframeOptimization, type CrossTfProgress, type CrossTfResult, type LabelScoringOptions } from "./gmaOptimizer";
 import { computeMacd } from "./macd";
-import { CROSS_TF_OPTIMIZE_OPTIONS, CUSTOM_TIMEFRAME, DEFAULT_MACD_PARAMS, DEFAULT_MANUAL_WINDOW, DEFAULT_PARAMS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_SIGMA_MAX, GMA_SIGMA_MIN, MACD_FAST_MAX, MACD_PERIOD_MIN, MACD_SIGNAL_MAX, MACD_SLOW_MAX, clampGmaParams, gmaScale, isValidGmaPair, isValidMacdPair, isValidTimeframeSpec, normalizeTimeframeSpec, OPTIMIZE_OPTIONS, type Bar, type GmaParams, type LoadProgress, type MacdParams, type ManualEntryWindow, type ManualPoint, type ManualSelectionMode, type OptimizeMetric, type OptimizeProgress, type OptimizeResult } from "./types";
+import { CROSS_TF_OPTIMIZE_OPTIONS, CUSTOM_TIMEFRAME, DEFAULT_GMA_MACD_PARAMS, DEFAULT_MACD_PARAMS, DEFAULT_MANUAL_WINDOW, DEFAULT_PARAMS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_MACD_LENGTH_MAX, GMA_MACD_LENGTH_MIN, GMA_MACD_SIGMA_MAX, GMA_MACD_SIGMA_MIN, GMA_SIGMA_MAX, GMA_SIGMA_MIN, MACD_FAST_MAX, MACD_PERIOD_MIN, MACD_SIGNAL_MAX, MACD_SLOW_MAX, clampGmaParams, gmaMacdFastScale, gmaMacdSlowScale, gmaScale, isValidGmaMacdPair, isValidGmaPair, isValidMacdPair, isValidTimeframeSpec, normalizeTimeframeSpec, OPTIMIZE_OPTIONS, type Bar, type GmaMacdParams, type GmaParams, type LoadProgress, type MacdParams, type ManualEntryWindow, type ManualPoint, type ManualSelectionMode, type OptimizeMetric, type OptimizeProgress, type OptimizeResult } from "./types";
 
 import { computeTradeStats, formatActions, formatPct, formatPoints, formatWinRateLine, isUpAction, withActions, type SignalConfig } from "./tradeStats";
 
@@ -76,8 +76,11 @@ export default function App() {
   const [gmaApplied, setGmaApplied] = useState(false);
   const [macdDraft, setMacdDraft] = useState<MacdParams>(DEFAULT_MACD_PARAMS);
   const [macdApplied, setMacdApplied] = useState(false);
+  const [gmaMacdDraft, setGmaMacdDraft] = useState<GmaMacdParams>(DEFAULT_GMA_MACD_PARAMS);
+  const [gmaMacdApplied, setGmaMacdApplied] = useState(false);
   const [configGma, setConfigGma] = useState(false);
   const [configMacd, setConfigMacd] = useState(false);
+  const [configGmaMacd, setConfigGmaMacd] = useState(false);
   const [optimizeGma, setOptimizeGma] = useState(true);
   const [optimizeMacd, setOptimizeMacd] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -110,12 +113,16 @@ export default function App() {
   const slowScale = gmaScale(draft.slowLength, draft.slowSigma);
   const gmaPairOk = isValidGmaPair(draft);
   const macdPairOk = isValidMacdPair(macdDraft);
+  const gmaMacdPairOk = isValidGmaMacdPair(gmaMacdDraft);
   const configActive = gmaApplied || macdApplied;
   const optimizeMacdOn = optimizeGma && optimizeMacd;
   const configValid =
-    (configGma || configMacd) &&
+    (configGma || configMacd || configGmaMacd) &&
     (!configGma || gmaPairOk) &&
-    (!configMacd || macdPairOk);
+    (!configMacd || macdPairOk) &&
+    (!configGmaMacd || gmaMacdPairOk);
+  const gmaMacdFastScaleVal = gmaMacdFastScale(gmaMacdDraft);
+  const gmaMacdSlowScaleVal = gmaMacdSlowScale(gmaMacdDraft);
   const signalConfig = useMemo((): SignalConfig | undefined => {
     if (!configActive) return undefined;
     return {
@@ -328,8 +335,11 @@ export default function App() {
     setGmaApplied(false);
     setMacdDraft(DEFAULT_MACD_PARAMS);
     setMacdApplied(false);
+    setGmaMacdDraft(DEFAULT_GMA_MACD_PARAMS);
+    setGmaMacdApplied(false);
     setConfigGma(false);
     setConfigMacd(false);
+    setConfigGmaMacd(false);
     setOptimizeGma(true);
     setOptimizeMacd(false);
     setOptimizationProgress(null);
@@ -422,6 +432,7 @@ export default function App() {
     if (locked || !configValid || !symbol || !effectiveTf || busy) return;
     setGmaApplied(configGma);
     setMacdApplied(configMacd);
+    setGmaMacdApplied(configGmaMacd);
     setApplyingConfig(true);
     setStatus("loading");
     if (configGma) {
@@ -813,7 +824,7 @@ export default function App() {
                 disabled={locked || busy || optimizing}
                 onChange={(event) => setConfigMacd(event.target.checked)}
               />
-              MACD
+              MACD (EMA)
             </label>
             <p className="hint">
               EMA {macdDraft.fast} / {macdDraft.slow} · Signal {macdDraft.signal}
@@ -879,7 +890,211 @@ export default function App() {
               <p className="hint warn">Invalid pair: fast period must be less than slow</p>
             )}
           </div>
-          {!configGma && !configMacd && (
+          <div className={`indicator${gmaMacdApplied ? " active" : ""}`}>
+            <label className="indicator-toggle gma-macd">
+              <input
+                type="checkbox"
+                checked={configGmaMacd}
+                disabled={locked || busy || optimizing}
+                onChange={(event) => setConfigGmaMacd(event.target.checked)}
+              />
+              MACD-GMA
+            </label>
+            <p className="hint">
+              F L {gmaMacdDraft.fastLength} σ {gmaMacdDraft.fastSigma} · S L{" "}
+              {gmaMacdDraft.slowLength} σ {gmaMacdDraft.slowSigma} · Sig L{" "}
+              {gmaMacdDraft.signalLength} σ {gmaMacdDraft.signalSigma}
+            </p>
+            <p className="hint">
+              Source{" "}
+              {gmaMacdDraft.source === "close"
+                ? "Close"
+                : `EMA(${gmaMacdDraft.emaLength})`}{" "}
+              · F L/σ {gmaMacdFastScaleVal.toFixed(2)} · S L/σ {gmaMacdSlowScaleVal.toFixed(2)}
+            </p>
+            <label className="indicator-sub">Source</label>
+            <div className="view-toggle source-toggle">
+              <button
+                type="button"
+                className={gmaMacdDraft.source === "close" ? "active" : ""}
+                disabled={locked}
+                onClick={() => setGmaMacdDraft({ ...gmaMacdDraft, source: "close" })}
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                className={gmaMacdDraft.source === "ema" ? "active" : ""}
+                disabled={locked}
+                onClick={() => setGmaMacdDraft({ ...gmaMacdDraft, source: "ema" })}
+              >
+                EMA(n)
+              </button>
+            </div>
+            {gmaMacdDraft.source === "ema" && (
+              <label>
+                EMA n
+                <input
+                  type="number"
+                  min={1}
+                  max={24}
+                  value={gmaMacdDraft.emaLength}
+                  disabled={locked}
+                  onChange={(e) =>
+                    setGmaMacdDraft({
+                      ...gmaMacdDraft,
+                      emaLength: Math.max(1, Number(e.target.value) || 1),
+                    })
+                  }
+                />
+              </label>
+            )}
+            <p className="indicator-sub">Fast GMA</p>
+            <label>
+              Length
+              <input
+                type="range"
+                min={GMA_MACD_LENGTH_MIN}
+                max={GMA_MACD_LENGTH_MAX}
+                value={gmaMacdDraft.fastLength}
+                disabled={locked}
+                onChange={(e) =>
+                  setGmaMacdDraft({ ...gmaMacdDraft, fastLength: Number(e.target.value) })
+                }
+              />
+              <input
+                type="number"
+                min={GMA_MACD_LENGTH_MIN}
+                max={GMA_MACD_LENGTH_MAX}
+                value={gmaMacdDraft.fastLength}
+                disabled={locked}
+                onChange={(e) =>
+                  setGmaMacdDraft({ ...gmaMacdDraft, fastLength: Number(e.target.value) })
+                }
+              />
+            </label>
+            <label>
+              Sigma
+              <input
+                type="range"
+                min={GMA_MACD_SIGMA_MIN}
+                max={GMA_MACD_SIGMA_MAX}
+                value={gmaMacdDraft.fastSigma}
+                disabled={locked}
+                onChange={(e) =>
+                  setGmaMacdDraft({ ...gmaMacdDraft, fastSigma: Number(e.target.value) })
+                }
+              />
+              <input
+                type="number"
+                min={GMA_MACD_SIGMA_MIN}
+                max={GMA_MACD_SIGMA_MAX}
+                value={gmaMacdDraft.fastSigma}
+                disabled={locked}
+                onChange={(e) =>
+                  setGmaMacdDraft({ ...gmaMacdDraft, fastSigma: Number(e.target.value) })
+                }
+              />
+            </label>
+            <p className="indicator-sub">Slow GMA</p>
+            <label>
+              Length
+              <input
+                type="range"
+                min={GMA_MACD_LENGTH_MIN}
+                max={GMA_MACD_LENGTH_MAX}
+                value={gmaMacdDraft.slowLength}
+                disabled={locked}
+                onChange={(e) =>
+                  setGmaMacdDraft({ ...gmaMacdDraft, slowLength: Number(e.target.value) })
+                }
+              />
+              <input
+                type="number"
+                min={GMA_MACD_LENGTH_MIN}
+                max={GMA_MACD_LENGTH_MAX}
+                value={gmaMacdDraft.slowLength}
+                disabled={locked}
+                onChange={(e) =>
+                  setGmaMacdDraft({ ...gmaMacdDraft, slowLength: Number(e.target.value) })
+                }
+              />
+            </label>
+            <label>
+              Sigma
+              <input
+                type="range"
+                min={GMA_MACD_SIGMA_MIN}
+                max={GMA_MACD_SIGMA_MAX}
+                value={gmaMacdDraft.slowSigma}
+                disabled={locked}
+                onChange={(e) =>
+                  setGmaMacdDraft({ ...gmaMacdDraft, slowSigma: Number(e.target.value) })
+                }
+              />
+              <input
+                type="number"
+                min={GMA_MACD_SIGMA_MIN}
+                max={GMA_MACD_SIGMA_MAX}
+                value={gmaMacdDraft.slowSigma}
+                disabled={locked}
+                onChange={(e) =>
+                  setGmaMacdDraft({ ...gmaMacdDraft, slowSigma: Number(e.target.value) })
+                }
+              />
+            </label>
+            <p className="indicator-sub">Signal GMA</p>
+            <label>
+              Length
+              <input
+                type="range"
+                min={GMA_MACD_LENGTH_MIN}
+                max={GMA_MACD_LENGTH_MAX}
+                value={gmaMacdDraft.signalLength}
+                disabled={locked}
+                onChange={(e) =>
+                  setGmaMacdDraft({ ...gmaMacdDraft, signalLength: Number(e.target.value) })
+                }
+              />
+              <input
+                type="number"
+                min={GMA_MACD_LENGTH_MIN}
+                max={GMA_MACD_LENGTH_MAX}
+                value={gmaMacdDraft.signalLength}
+                disabled={locked}
+                onChange={(e) =>
+                  setGmaMacdDraft({ ...gmaMacdDraft, signalLength: Number(e.target.value) })
+                }
+              />
+            </label>
+            <label>
+              Sigma
+              <input
+                type="range"
+                min={GMA_MACD_SIGMA_MIN}
+                max={GMA_MACD_SIGMA_MAX}
+                value={gmaMacdDraft.signalSigma}
+                disabled={locked}
+                onChange={(e) =>
+                  setGmaMacdDraft({ ...gmaMacdDraft, signalSigma: Number(e.target.value) })
+                }
+              />
+              <input
+                type="number"
+                min={GMA_MACD_SIGMA_MIN}
+                max={GMA_MACD_SIGMA_MAX}
+                value={gmaMacdDraft.signalSigma}
+                disabled={locked}
+                onChange={(e) =>
+                  setGmaMacdDraft({ ...gmaMacdDraft, signalSigma: Number(e.target.value) })
+                }
+              />
+            </label>
+            {!gmaMacdPairOk && (
+              <p className="hint warn">Invalid pair: fast L/σ must be less than slow L/σ</p>
+            )}
+          </div>
+          {!configGma && !configMacd && !configGmaMacd && (
             <p className="hint warn">Select at least one indicator</p>
           )}
           {configGma && configMacd && macdPairOk && (
@@ -949,7 +1164,7 @@ export default function App() {
           )}
           {optimizeGma && optimizeMacd && (
             <p className="hint">
-              MACD fixed at 12/26/9 · grid-search valid GMA pairs (L≥2, fast L/σ &lt; slow L/σ)
+              MACD fixed at 12/26/9 · grid-search GMA pairs (L≥2, L/σ≤3, fast L/σ &lt; slow L/σ)
             </p>
           )}
           {optimizeMacdOn && (
@@ -1477,8 +1692,10 @@ export default function App() {
             timeZone={chartZone}
             showIndicators={gmaApplied}
             showMacd={macdApplied}
+            showGmaMacd={gmaMacdApplied}
             showSignals={configActive}
             macdParams={macdDraft}
+            gmaMacdParams={gmaMacdDraft}
             selectionMode={manualMode}
             entryPoints={entryPoints}
             exitPoints={exitPoints}
@@ -1502,9 +1719,16 @@ export default function App() {
           )}
           {macdApplied && (
             <>
-              <div><i className="swatch macd" /> MACD</div>
-              <div><i className="swatch macd-signal" /> Signal</div>
+              <div><i className="swatch macd" /> MACD line (EMA)</div>
+              <div><i className="swatch macd-signal" /> Signal (EMA)</div>
               <div><i className="swatch macd-hist" /> Histogram</div>
+            </>
+          )}
+          {gmaMacdApplied && (
+            <>
+              <div><i className="swatch gma-macd" /> MACD line (GMA)</div>
+              <div><i className="swatch gma-macd-signal" /> Signal (GMA)</div>
+              <div><i className="swatch gma-macd-hist" /> Histogram</div>
             </>
           )}
         </section>

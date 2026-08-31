@@ -265,7 +265,8 @@ function metricValue(metric, stats, labelBreakdown, useLabels, labels, labelWind
 }
 
 function isValidGmaConfig(length, sigma) {
-  return length >= 2 && length / sigma <= 5;
+  const ratio = length / sigma;
+  return length >= 2 && ratio <= 3;
 }
 
 function isValidGmaPair(fast, slow) {

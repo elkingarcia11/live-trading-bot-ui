@@ -135,6 +135,65 @@ export function clampMacdParams(params: MacdParams): MacdParams {
   };
 }
 
+export type GmaMacdSource = "close" | "ema";
+
+export interface GmaMacdParams {
+  fastLength: number;
+  fastSigma: number;
+  slowLength: number;
+  slowSigma: number;
+  signalLength: number;
+  signalSigma: number;
+  source: GmaMacdSource;
+  emaLength: number;
+}
+
+export const GMA_MACD_LENGTH_MIN = 1;
+export const GMA_MACD_LENGTH_MAX = 24;
+export const GMA_MACD_SIGMA_MIN = 1;
+export const GMA_MACD_SIGMA_MAX = 5;
+export const GMA_MACD_EMA_LENGTH_MIN = 1;
+
+export const DEFAULT_GMA_MACD_PARAMS: GmaMacdParams = {
+  fastLength: 9,
+  fastSigma: 2,
+  slowLength: 21,
+  slowSigma: 3,
+  signalLength: 9,
+  signalSigma: 2,
+  source: "close",
+  emaLength: 3,
+};
+
+export function gmaMacdFastScale(params: GmaMacdParams): number {
+  return params.fastLength / params.fastSigma;
+}
+
+export function gmaMacdSlowScale(params: GmaMacdParams): number {
+  return params.slowLength / params.slowSigma;
+}
+
+export function isValidGmaMacdPair(params: GmaMacdParams): boolean {
+  return gmaMacdFastScale(params) < gmaMacdSlowScale(params);
+}
+
+export function clampGmaMacdParams(params: GmaMacdParams): GmaMacdParams {
+  const clampLen = (value: number) =>
+    Math.min(GMA_MACD_LENGTH_MAX, Math.max(GMA_MACD_LENGTH_MIN, Math.round(value) || GMA_MACD_LENGTH_MIN));
+  const clampSig = (value: number) =>
+    Math.min(GMA_MACD_SIGMA_MAX, Math.max(GMA_MACD_SIGMA_MIN, Math.round(value) || GMA_MACD_SIGMA_MIN));
+  return {
+    fastLength: clampLen(params.fastLength),
+    fastSigma: clampSig(params.fastSigma),
+    slowLength: clampLen(params.slowLength),
+    slowSigma: clampSig(params.slowSigma),
+    signalLength: clampLen(params.signalLength),
+    signalSigma: clampSig(params.signalSigma),
+    source: params.source === "ema" ? "ema" : "close",
+    emaLength: Math.max(GMA_MACD_EMA_LENGTH_MIN, Math.round(params.emaLength) || GMA_MACD_EMA_LENGTH_MIN),
+  };
+}
+
 const TF_SPEC_RE = /^(\d+)(t|s|m|h)$/i;
 const TF_UNIT_SECONDS: Record<string, number> = { t: 0, s: 1, m: 60, h: 3600 };
 

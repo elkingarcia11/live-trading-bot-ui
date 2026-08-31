@@ -10,9 +10,10 @@ import {
   type SeriesMarker,
   type UTCTimestamp,
 } from "lightweight-charts";
+import { computeGmaMacd } from "./gmaMacd";
 import { computeMacd } from "./macd";
 import { ACTION_MARKER_TEXT } from "./tradeStats";
-import type { Action, Bar, MacdParams, ManualPoint, ManualSelectionMode } from "./types";
+import type { Action, Bar, GmaMacdParams, MacdParams, ManualPoint, ManualSelectionMode } from "./types";
 
 export type ChartZone = "local" | "et" | "ct" | "utc";
 
@@ -39,8 +40,10 @@ interface Props {
   timeZone: ChartZone;
   showIndicators: boolean;
   showMacd?: boolean;
+  showGmaMacd?: boolean;
   showSignals?: boolean;
   macdParams?: MacdParams;
+  gmaMacdParams?: GmaMacdParams;
   /** When not "off", a click on the chart adds/removes a selection point. */
   selectionMode?: ManualSelectionMode;
   /** Target entry points ($E_k$) to render as markers. */
@@ -62,6 +65,11 @@ const MACD_LINE = "#26c6da";
 const MACD_SIGNAL = "#e040fb";
 const MACD_HIST_UP = "rgba(38, 166, 154, 0.75)";
 const MACD_HIST_DOWN = "rgba(239, 83, 80, 0.75)";
+
+const GMA_MACD_LINE = "#2196F3";
+const GMA_MACD_SIGNAL = "#FF6D00";
+const GMA_MACD_HIST_UP = "rgba(76, 175, 80, 0.4)";
+const GMA_MACD_HIST_DOWN = "rgba(244, 67, 54, 0.4)";
 
 const CHART_LAYOUT = {
   background: { type: ColorType.Solid, color: "#0c1016" },
@@ -150,8 +158,10 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
     timeZone,
     showIndicators,
     showMacd = false,
+    showGmaMacd = false,
     showSignals = false,
     macdParams,
+    gmaMacdParams,
     selectionMode = "off",
     entryPoints = [],
     exitPoints = [],
@@ -161,8 +171,10 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
 ) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const macdHostRef = useRef<HTMLDivElement | null>(null);
+  const gmaMacdHostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const macdChartRef = useRef<IChartApi | null>(null);
+  const gmaMacdChartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const fastRef = useRef<ISeriesApi<"Line"> | null>(null);
   const slowRef = useRef<ISeriesApi<"Line"> | null>(null);
@@ -170,6 +182,9 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
   const macdLineRef = useRef<ISeriesApi<"Line"> | null>(null);
   const macdSignalRef = useRef<ISeriesApi<"Line"> | null>(null);
   const macdHistRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const gmaMacdLineRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const gmaMacdSignalRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const gmaMacdHistRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const fittedKeyRef = useRef("");
   const syncingRangeRef = useRef(false);
   const zoneRef = useRef(timeZone);
@@ -195,23 +210,31 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
     syncingRangeRef.current = false;
   }, []);
 
-  const subscribeRangeSync = useCallback((source: IChartApi, target: () => IChartApi | null) => {
+  const subscribeRangeSyncAll = useCallback((source: IChartApi) => {
     const handler = (range: LogicalRange | null) => {
-      const other = target();
-      if (!range || !other || syncingRangeRef.current) return;
+      if (!range || syncingRangeRef.current) return;
       syncingRangeRef.current = true;
-      other.timeScale().setVisibleLogicalRange(range);
+      for (const chart of [chartRef.current, macdChartRef.current, gmaMacdChartRef.current]) {
+        if (chart && chart !== source) {
+          chart.timeScale().setVisibleLogicalRange(range);
+        }
+      }
       syncingRangeRef.current = false;
     };
     source.timeScale().subscribeVisibleLogicalRangeChange(handler);
     return () => source.timeScale().unsubscribeVisibleLogicalRangeChange(handler);
   }, []);
 
-  // Expose an imperative way to jump back to the latest bar, invoked from the
-  // "go to front" button in the footer. Kept a stable callback via refs.
+  const updateTimeScaleVisibility = useCallback(() => {
+    chartRef.current?.applyOptions({ timeScale: { visible: !showMacd && !showGmaMacd } });
+    macdChartRef.current?.applyOptions({ timeScale: { visible: showMacd && !showGmaMacd } });
+    gmaMacdChartRef.current?.applyOptions({ timeScale: { visible: showGmaMacd } });
+  }, [showMacd, showGmaMacd]);
+
   const scrollToFront = useCallback(() => {
     chartRef.current?.timeScale().scrollToRealTime();
     macdChartRef.current?.timeScale().scrollToRealTime();
+    gmaMacdChartRef.current?.timeScale().scrollToRealTime();
   }, []);
   useImperativeHandle(ref, () => ({ scrollToFront }), [scrollToFront]);
 
@@ -303,6 +326,9 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
       onSelectRef.current(mode, index, loadedBars[index].time);
     });
 
+    applyTimeScaleFormat(chart, zoneRef.current);
+    const unsubRange = subscribeRangeSyncAll(chart);
+
     const resize = () => {
       chart.applyOptions({
         width: host.clientWidth,
@@ -315,14 +341,15 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
 
     return () => {
       observer.disconnect();
+      unsubRange();
       chart.remove();
       chartRef.current = null;
     };
-  }, []);
+  }, [applyTimeScaleFormat, subscribeRangeSyncAll]);
 
   useEffect(() => {
     if (!showMacd) {
-      chartRef.current?.applyOptions({ timeScale: { visible: true } });
+      updateTimeScaleVisibility();
       return;
     }
     const host = macdHostRef.current;
@@ -382,14 +409,11 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
     macdLineRef.current = macdLine;
     macdSignalRef.current = signal;
     macdHistRef.current = hist;
-    chartRef.current?.applyOptions({ timeScale: { visible: false } });
     applyTimeScaleFormat(macdChart, zoneRef.current);
     copyVisibleRange(chartRef.current, macdChart);
+    updateTimeScaleVisibility();
 
-    const unsubPrice = chartRef.current
-      ? subscribeRangeSync(chartRef.current, () => macdChartRef.current)
-      : () => {};
-    const unsubMacd = subscribeRangeSync(macdChart, () => chartRef.current);
+    const unsubMacd = subscribeRangeSyncAll(macdChart);
 
     const resize = () => {
       macdChart.applyOptions({
@@ -403,20 +427,110 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
 
     return () => {
       observer.disconnect();
-      unsubPrice();
       unsubMacd();
       macdChart.remove();
       macdChartRef.current = null;
       macdLineRef.current = null;
       macdSignalRef.current = null;
       macdHistRef.current = null;
-      chartRef.current?.applyOptions({ timeScale: { visible: true } });
+      updateTimeScaleVisibility();
     };
-  }, [showMacd, applyTimeScaleFormat, copyVisibleRange, subscribeRangeSync]);
+  }, [showMacd, applyTimeScaleFormat, copyVisibleRange, subscribeRangeSyncAll, updateTimeScaleVisibility]);
+
+  useEffect(() => {
+    if (!showGmaMacd) {
+      updateTimeScaleVisibility();
+      return;
+    }
+    const host = gmaMacdHostRef.current;
+    if (!host) return;
+
+    const gmaMacdChart = createChart(host, {
+      layout: { ...CHART_LAYOUT, attributionLogo: false },
+      grid: CHART_GRID,
+      crosshair: CHART_CROSSHAIR,
+      rightPriceScale: {
+        borderColor: "#1c2430",
+        scaleMargins: { top: 0.12, bottom: 0.08 },
+      },
+      timeScale: {
+        borderColor: "#1c2430",
+        timeVisible: true,
+        secondsVisible: true,
+        tickMarkFormatter: (time: UTCTimestamp) =>
+          formatChartTime(unixOf(time), zoneRef.current),
+      },
+      localization: {
+        timeFormatter: (time: UTCTimestamp) =>
+          formatChartTime(unixOf(time), zoneRef.current, true),
+      },
+      handleScroll: { mouseWheel: true, pressedMouseMove: true },
+      handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true },
+    });
+
+    const hist = gmaMacdChart.addHistogramSeries({
+      priceLineVisible: false,
+      lastValueVisible: false,
+      title: "Hist",
+    });
+    const macdLine = gmaMacdChart.addLineSeries({
+      color: GMA_MACD_LINE,
+      lineWidth: 2,
+      title: "MACD",
+      lastValueVisible: true,
+      priceLineVisible: false,
+    });
+    const signal = gmaMacdChart.addLineSeries({
+      color: GMA_MACD_SIGNAL,
+      lineWidth: 2,
+      title: "Signal",
+      lastValueVisible: true,
+      priceLineVisible: false,
+    });
+    macdLine.createPriceLine({
+      price: 0,
+      color: "#3d4a5c",
+      lineWidth: 1,
+      lineStyle: 2,
+      axisLabelVisible: false,
+    });
+
+    gmaMacdChartRef.current = gmaMacdChart;
+    gmaMacdLineRef.current = macdLine;
+    gmaMacdSignalRef.current = signal;
+    gmaMacdHistRef.current = hist;
+    applyTimeScaleFormat(gmaMacdChart, zoneRef.current);
+    copyVisibleRange(chartRef.current ?? macdChartRef.current, gmaMacdChart);
+    updateTimeScaleVisibility();
+
+    const unsub = subscribeRangeSyncAll(gmaMacdChart);
+
+    const resize = () => {
+      gmaMacdChart.applyOptions({
+        width: host.clientWidth,
+        height: host.clientHeight,
+      });
+    };
+    resize();
+    const observer = new ResizeObserver(resize);
+    observer.observe(host);
+
+    return () => {
+      observer.disconnect();
+      unsub();
+      gmaMacdChart.remove();
+      gmaMacdChartRef.current = null;
+      gmaMacdLineRef.current = null;
+      gmaMacdSignalRef.current = null;
+      gmaMacdHistRef.current = null;
+      updateTimeScaleVisibility();
+    };
+  }, [showGmaMacd, applyTimeScaleFormat, copyVisibleRange, subscribeRangeSyncAll, updateTimeScaleVisibility]);
 
   useEffect(() => {
     if (chartRef.current) applyTimeScaleFormat(chartRef.current, timeZone);
     if (macdChartRef.current) applyTimeScaleFormat(macdChartRef.current, timeZone);
+    if (gmaMacdChartRef.current) applyTimeScaleFormat(gmaMacdChartRef.current, timeZone);
   }, [timeZone, applyTimeScaleFormat]);
 
   useEffect(() => {
@@ -432,6 +546,9 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
       macdLineRef.current?.setData([]);
       macdSignalRef.current?.setData([]);
       macdHistRef.current?.setData([]);
+      gmaMacdLineRef.current?.setData([]);
+      gmaMacdSignalRef.current?.setData([]);
+      gmaMacdHistRef.current?.setData([]);
       return;
     }
 
@@ -488,6 +605,32 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
       copyVisibleRange(chartRef.current, macdChartRef.current);
     }
 
+    if (
+      showGmaMacd &&
+      gmaMacdParams &&
+      gmaMacdLineRef.current &&
+      gmaMacdSignalRef.current &&
+      gmaMacdHistRef.current
+    ) {
+      const times = unique.map((bar) => bar.time);
+      const series = computeGmaMacd(unique.map((bar) => bar.close), gmaMacdParams);
+      gmaMacdLineRef.current.setData(lineOrWhitespace(times, series.macd));
+      gmaMacdSignalRef.current.setData(lineOrWhitespace(times, series.signal));
+      gmaMacdHistRef.current.setData(
+        times.map((time, i) => {
+          const value = series.hist[i];
+          return value == null
+            ? { time: time as UTCTimestamp }
+            : {
+                time: time as UTCTimestamp,
+                value,
+                color: value >= 0 ? GMA_MACD_HIST_UP : GMA_MACD_HIST_DOWN,
+              };
+        }),
+      );
+      copyVisibleRange(chartRef.current ?? macdChartRef.current, gmaMacdChartRef.current);
+    }
+
     const markers: SeriesMarker<UTCTimestamp>[] = [];
     if (showSignals) {
       unique.forEach((bar) => {
@@ -542,17 +685,50 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
       fittedKeyRef.current = fitKey;
       chartRef.current?.timeScale().fitContent();
       copyVisibleRange(chartRef.current, macdChartRef.current);
+      copyVisibleRange(chartRef.current, gmaMacdChartRef.current);
     }
-  }, [bars, fitKey, showIndicators, showSignals, showMacd, macdParams, entryPoints, exitPoints, copyVisibleRange]);
+  }, [
+    bars,
+    fitKey,
+    showIndicators,
+    showSignals,
+    showMacd,
+    showGmaMacd,
+    macdParams,
+    gmaMacdParams,
+    entryPoints,
+    exitPoints,
+    copyVisibleRange,
+  ]);
+
+  const stackClass = [
+    "chart-stack",
+    showMacd ? "has-macd" : "",
+    showGmaMacd ? "has-gma-macd" : "",
+    showMacd && showGmaMacd ? "has-dual-macd" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
-    <div className={`chart-stack${showMacd ? " has-macd" : ""}`}>
+    <div className={stackClass}>
       <div className="chart-host" ref={hostRef} />
       {showMacd && (
         <div className="macd-host" ref={macdHostRef}>
           {macdParams && (
             <div className="macd-label">
-              MACD ({macdParams.fast}, {macdParams.slow}, {macdParams.signal})
+              MACD EMA ({macdParams.fast}, {macdParams.slow}, {macdParams.signal})
+            </div>
+          )}
+        </div>
+      )}
+      {showGmaMacd && (
+        <div className="gma-macd-host" ref={gmaMacdHostRef}>
+          {gmaMacdParams && (
+            <div className="macd-label">
+              MACD-GMA F {gmaMacdParams.fastLength}/{gmaMacdParams.fastSigma} · S{" "}
+              {gmaMacdParams.slowLength}/{gmaMacdParams.slowSigma} · Sig{" "}
+              {gmaMacdParams.signalLength}/{gmaMacdParams.signalSigma}
             </div>
           )}
         </div>

@@ -266,6 +266,14 @@ select {
   accent-color: var(--macd);
 }
 
+.sidebar label.indicator-toggle.gma-macd input[type="checkbox"] {
+  accent-color: #2196f3;
+}
+
+.source-toggle {
+  margin-bottom: 8px;
+}
+
 .indicator-sub {
   margin: 10px 0 8px;
   color: var(--muted);
@@ -557,6 +565,15 @@ input[type="range"] {
 .swatch.macd-hist {
   background: linear-gradient(90deg, #26a69a 50%, #ef5350 50%);
 }
+.swatch.gma-macd {
+  background: #2196f3;
+}
+.swatch.gma-macd-signal {
+  background: #ff6d00;
+}
+.swatch.gma-macd-hist {
+  background: linear-gradient(90deg, rgba(76, 175, 80, 0.9) 50%, rgba(244, 67, 54, 0.9) 50%);
+}
 .arrow {
   display: inline-block;
   width: 0;
@@ -748,7 +765,8 @@ input[type="range"] {
 }
 
 .chart-host,
-.macd-host {
+.macd-host,
+.gma-macd-host {
   position: relative;
   min-width: 0;
   min-height: 0;
@@ -758,11 +776,18 @@ input[type="range"] {
   flex: 1 1 auto;
 }
 
-.macd-host {
+.macd-host,
+.gma-macd-host {
   flex: 0 0 24%;
   min-height: 100px;
   max-height: 240px;
   border-top: 1px solid var(--line);
+}
+
+.chart-stack.has-dual-macd .macd-host,
+.chart-stack.has-dual-macd .gma-macd-host {
+  flex: 0 0 20%;
+  max-height: 200px;
 }
 
 .macd-label {
