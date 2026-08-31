@@ -111,7 +111,7 @@ export default function App() {
   const gmaPairOk = isValidGmaPair(draft);
   const macdPairOk = isValidMacdPair(macdDraft);
   const configActive = gmaApplied || macdApplied;
-  const optimizeMacdOn = optimizeGma && optimizeMacd && macdPairOk;
+  const optimizeMacdOn = optimizeGma && optimizeMacd;
   const configValid =
     (configGma || configMacd) &&
     (!configGma || gmaPairOk) &&
@@ -452,7 +452,7 @@ export default function App() {
         labelScoring,
         controller.signal,
         optimizeMacdOn
-          ? { fast: macdDraft.fast, slow: macdDraft.slow }
+          ? { mode: "search", signal: macdDraft.signal }
           : null,
       );
       if (gmaOptAbortRef.current !== controller) return;
@@ -477,6 +477,13 @@ export default function App() {
       slowLength: optimizationResult.params.slow_length,
       slowSigma: optimizationResult.params.slow_sigma,
     });
+    if (optimizeMacd && optimizationResult.macd_params) {
+      setMacdDraft({
+        fast: optimizationResult.macd_params.fast,
+        slow: optimizationResult.macd_params.slow,
+        signal: optimizationResult.macd_params.signal,
+      });
+    }
     setDraft(best);
     setParams(best);
     setConfigGma(true);
@@ -513,7 +520,7 @@ export default function App() {
         labelScoring,
         controller.signal,
         optimizeMacdOn
-          ? { fast: macdDraft.fast, slow: macdDraft.slow }
+          ? { mode: "search", signal: macdDraft.signal }
           : null,
       );
       if (crossTfAbortRef.current !== controller) return;
@@ -538,6 +545,13 @@ export default function App() {
       slowLength: crossTfResult.params.slow_length,
       slowSigma: crossTfResult.params.slow_sigma,
     });
+    if (optimizeMacd && crossTfResult.macd_params) {
+      setMacdDraft({
+        fast: crossTfResult.macd_params.fast,
+        slow: crossTfResult.macd_params.slow,
+        signal: crossTfResult.macd_params.signal,
+      });
+    }
     setDraft(best);
     setParams(best);
     setConfigGma(true);
@@ -882,7 +896,7 @@ export default function App() {
           )}
           {configGma && configMacd && macdPairOk && (
             <p className="hint">
-              Long: fast GMA &gt; slow GMA and MACD &gt; 0 · Short: fast GMA &lt; slow GMA and MACD &lt; 0
+              Open long/short: GMA and MACD must agree · Close: GMA crossover only
             </p>
           )}
           {configGma && !configMacd && (
@@ -945,12 +959,14 @@ export default function App() {
           {!optimizeGma && (
             <p className="hint warn">Enable GMA to run optimization</p>
           )}
-          {optimizeGma && optimizeMacd && !macdPairOk && (
-            <p className="hint warn">Invalid MACD: fast period must be less than slow</p>
+          {optimizeGma && optimizeMacd && (
+            <p className="hint">
+              Grid-search GMA pairs (L≥2, fast L/σ &lt; slow L/σ) and MACD fast/slow (≥2, fast &lt; slow). Signal uses sidebar value — not part of the zero-line filter.
+            </p>
           )}
           {optimizeMacdOn && (
             <p className="hint">
-              Long: fast GMA &gt; slow GMA and MACD &gt; 0 · Short: fast GMA &lt; slow GMA and MACD &lt; 0
+              Open long/short: GMA and MACD must agree · Close: GMA crossover only
             </p>
           )}
           <label className="optimizer-feature">
@@ -1007,7 +1023,6 @@ export default function App() {
                 !symbol ||
                 !effectiveTf ||
                 !optimizeGma ||
-                (optimizeMacd && !macdPairOk) ||
                 (optimizationFeature === "label_score" && !hasManualLabels)
               }
               onClick={optimizeGmas}
@@ -1043,8 +1058,8 @@ export default function App() {
               <dl className="optimizer-params">
                 <div><dt>Fast GMA</dt><dd>L {optimizationResult.params.fast_length} · σ {optimizationResult.params.fast_sigma.toFixed(1)}</dd></div>
                 <div><dt>Slow GMA</dt><dd>L {optimizationResult.params.slow_length} · σ {optimizationResult.params.slow_sigma.toFixed(1)}</dd></div>
-                {optimizeMacdOn && (
-                  <div><dt>MACD</dt><dd>{macdDraft.fast} / {macdDraft.slow} confirmation</dd></div>
+                {optimizeMacdOn && optimizationResult.macd_params && (
+                  <div><dt>MACD</dt><dd>{optimizationResult.macd_params.fast} / {optimizationResult.macd_params.slow} / {optimizationResult.macd_params.signal}</dd></div>
                 )}
               </dl>
               {optimizationFeature === "label_score" &&
@@ -1414,7 +1429,7 @@ export default function App() {
               crossTfOptimizing ||
               busy ||
               !optimizeGma ||
-              (optimizeMacd && !macdPairOk)
+              (optimizationFeature === "label_score" && !hasManualLabels)
             }
             onClick={optimizeCrossTimeframes}
           >
@@ -1486,8 +1501,9 @@ export default function App() {
           <h2>Legend</h2>
           {configActive && (
             <>
-              <div><i className="arrow buy" /> Long entry / short exit</div>
-              <div><i className="arrow sell" /> Short entry / long exit</div>
+              <div><i className="arrow buy" /> Long Open / Put Close</div>
+              <div><i className="arrow sell" /> Long Close / Put Open</div>
+              <div className="hint">Markers are labeled on chart (e.g. Long Close, Put Open)</div>
             </>
           )}
           {gmaApplied && (

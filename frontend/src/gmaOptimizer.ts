@@ -19,8 +19,10 @@ import {
 // outside this file get full typing on the new metric without a local cast.
 
 const WORKER_SOURCE = `
-const LENGTHS = [...Array(30)].map((_, i) => i + 1).concat([...Array(10)].map((_, i) => 32 + i * 2));
+const LENGTHS = [...Array(29)].map((_, i) => i + 2).concat([...Array(10)].map((_, i) => 32 + i * 2));
 const SIGMAS = [...Array(19)].map((_, i) => (i + 2) * 0.5);
+const MACD_FAST = [...Array(10)].map((_, i) => 2 + i * 2);
+const MACD_SLOW = [...Array(15)].map((_, i) => 22 + i * 2);
 const ET_FORMAT = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
   hour: "2-digit", minute: "2-digit", hour12: false, hourCycle: "h23"
@@ -105,37 +107,93 @@ function tradeIndices(fast, slow, masks, macd) {
   const flatten = [];
   for (let i = 1; i < fast.length; i++) {
     if (!Number.isFinite(fast[i]) || !Number.isFinite(fast[i - 1]) || !Number.isFinite(slow[i]) || !Number.isFinite(slow[i - 1])) continue;
-    let up, down;
-    if (macd) {
-      if (!Number.isFinite(macd[i]) || !Number.isFinite(macd[i - 1])) continue;
-      const longNow = fast[i] > slow[i] && macd[i] > 0;
-      const longPrev = fast[i - 1] > slow[i - 1] && macd[i - 1] > 0;
-      const shortNow = fast[i] < slow[i] && macd[i] < 0;
-      const shortPrev = fast[i - 1] < slow[i - 1] && macd[i - 1] < 0;
-      up = longNow && !longPrev;
-      down = shortNow && !shortPrev;
-    } else {
-      up = fast[i - 1] <= slow[i - 1] && fast[i] > slow[i];
-      down = fast[i - 1] >= slow[i - 1] && fast[i] < slow[i];
-    }
+    const up = fast[i - 1] <= slow[i - 1] && fast[i] > slow[i];
+    const down = fast[i - 1] >= slow[i - 1] && fast[i] < slow[i];
     if (masks.rth[i] && !masks.close[i] && !masks.open[i]) {
       if (up) buy.push(i);
       if (down) sell.push(i);
     }
   }
   for (let i = 0; i < fast.length; i++) {
-    if (masks.open[i] && !masks.close[i] && Number.isFinite(fast[i]) && Number.isFinite(slow[i]) && (!macd || Number.isFinite(macd[i]))) {
-      if (macd) {
-        if (fast[i] > slow[i] && macd[i] > 0) buy.push(i);
-        if (fast[i] < slow[i] && macd[i] < 0) sell.push(i);
-      } else {
-        if (fast[i] > slow[i]) buy.push(i);
-        if (fast[i] < slow[i]) sell.push(i);
-      }
+    if (masks.open[i] && !masks.close[i] && Number.isFinite(fast[i]) && Number.isFinite(slow[i])) {
+      if (fast[i] > slow[i]) buy.push(i);
+      if (fast[i] < slow[i]) sell.push(i);
     }
     if (masks.close[i]) flatten.push(i);
   }
   return { buy, sell, flatten };
+}
+
+function scoreMacdTrades(fast, slow, close, high, low, masks, macd) {
+  let side = 0, entry = 0;
+  let closed = 0, wins = 0, longClosed = 0, shortClosed = 0, longWins = 0, shortWins = 0;
+  let profit = 0, longProfit = 0, shortProfit = 0, profitPct = 0, longProfitPct = 0, shortProfitPct = 0;
+  let tradeRunup = 0, maxRunup = 0, totalRunup = 0;
+  const entryIndices = [];
+  const exitIndices = [];
+  const closeTrade = (price, index) => {
+    if (!side) return;
+    const pnl = side === 1 ? price - entry : entry - price;
+    const pct = entry === 0 ? 0 : pnl / entry * 100;
+    closed++; wins += pnl > 0 ? 1 : 0; profit += pnl; profitPct += pct;
+    if (tradeRunup > maxRunup) maxRunup = tradeRunup;
+    totalRunup += tradeRunup;
+    if (side === 1) {
+      longClosed++; longWins += pnl > 0 ? 1 : 0; longProfit += pnl; longProfitPct += pct;
+    } else {
+      shortClosed++; shortWins += pnl > 0 ? 1 : 0; shortProfit += pnl; shortProfitPct += pct;
+    }
+    exitIndices.push(index);
+    side = 0;
+    tradeRunup = 0;
+  };
+  const openLong = (price, index) => {
+    entry = price; side = 1; entryIndices.push(index);
+    tradeRunup = Math.max(0, (high[index] - price) / price * 100);
+  };
+  const openShort = (price, index) => {
+    entry = price; side = -1; entryIndices.push(index);
+    tradeRunup = Math.max(0, (price - low[index]) / price * 100);
+  };
+  for (let i = 0; i < fast.length; i++) {
+    if (side === 1) tradeRunup = Math.max(tradeRunup, (high[i] - entry) / entry * 100);
+    else if (side === -1) tradeRunup = Math.max(tradeRunup, (entry - low[i]) / entry * 100);
+    if (masks.close[i]) {
+      if (side) closeTrade(close[i], i);
+      continue;
+    }
+    if (!masks.rth[i]) continue;
+    if (!Number.isFinite(fast[i]) || !Number.isFinite(slow[i]) || !Number.isFinite(macd[i])) continue;
+    const gmaLong = fast[i] > slow[i];
+    const gmaShort = fast[i] < slow[i];
+    const gmaLongPrev = i > 0 && Number.isFinite(fast[i - 1]) && Number.isFinite(slow[i - 1]) && fast[i - 1] > slow[i - 1];
+    const gmaShortPrev = i > 0 && Number.isFinite(fast[i - 1]) && Number.isFinite(slow[i - 1]) && fast[i - 1] < slow[i - 1];
+    const macdLong = macd[i] > 0;
+    const macdShort = macd[i] < 0;
+    const macdLongPrev = i > 0 && Number.isFinite(macd[i - 1]) && macd[i - 1] > 0;
+    const macdShortPrev = i > 0 && Number.isFinite(macd[i - 1]) && macd[i - 1] < 0;
+    let gmaBuy = false;
+    let gmaSell = false;
+    if (!masks.open[i]) {
+      gmaBuy = gmaLong && !gmaLongPrev;
+      gmaSell = gmaShort && !gmaShortPrev;
+    }
+    let openLongSignal = false;
+    let openShortSignal = false;
+    if (masks.open[i]) {
+      openLongSignal = gmaLong && macdLong;
+      openShortSignal = gmaShort && macdShort;
+    } else {
+      openLongSignal = gmaLong && macdLong && !(gmaLongPrev && macdLongPrev);
+      openShortSignal = gmaShort && macdShort && !(gmaShortPrev && macdShortPrev);
+    }
+    const price = close[i];
+    if (side === 1 && gmaSell) closeTrade(price, i);
+    if (side === -1 && gmaBuy) closeTrade(price, i);
+    if (!side && openLongSignal) openLong(price, i);
+    else if (!side && openShortSignal) openShort(price, i);
+  }
+  return { closed, wins, longClosed, shortClosed, longWins, shortWins, profit, longProfit, shortProfit, profitPct, longProfitPct, shortProfitPct, maxRunup, avgMaxRunup: closed ? totalRunup / closed : 0, entryIndices, exitIndices };
 }
 
 function score(close, high, low, events) {
@@ -186,60 +244,111 @@ function score(close, high, low, events) {
   return { closed, wins, longClosed, shortClosed, longWins, shortWins, profit, longProfit, shortProfit, profitPct, longProfitPct, shortProfitPct, maxRunup, avgMaxRunup: closed ? totalRunup / closed : 0, entryIndices, exitIndices };
 }
 
+function metricValue(metric, stats, labelBreakdown, useLabels, labels, labelWindow, labelWeights) {
+  if (metric === "label_score") {
+    const breakdown = useLabels
+      ? scoreLabelSet(labels.entries, labels.exits, stats.entryIndices, stats.exitIndices, labelWindow, labelWeights)
+      : { entryMatches: [], exitMatches: [], entryFalseNegatives: 0, exitFalseNegatives: 0, falsePositives: 0, entryProximitySum: 0, exitProximitySum: 0, totalScore: 0 };
+    return { value: breakdown.totalScore, labelBreakdown: breakdown };
+  }
+  const value = metric === "total_win_rate" ? (stats.closed ? stats.wins / stats.closed * 100 : 0)
+    : metric === "call_win_rate" ? (stats.longClosed ? stats.longWins / stats.longClosed * 100 : 0)
+    : metric === "put_win_rate" ? (stats.shortClosed ? stats.shortWins / stats.shortClosed * 100 : 0)
+    : metric === "total_profit_pct" ? stats.profitPct
+    : metric === "call_profit_pct" ? stats.longProfitPct
+    : metric === "put_profit_pct" ? stats.shortProfitPct
+    : metric === "max_runup_pct" ? stats.maxRunup
+    : metric === "avg_max_runup_pct" ? stats.avgMaxRunup
+    : (stats.closed ? stats.profitPct / stats.closed : 0);
+  return { value, labelBreakdown: null };
+}
+
+function isValidGmaConfig(length, sigma) {
+  return length >= 2 && length / sigma <= 5;
+}
+
+function isValidGmaPair(fast, slow) {
+  return fast.length >= 2 && slow.length >= 2 && fast.ratio < slow.ratio;
+}
+
+function isValidMacdCombo(fast, slow, signal) {
+  return fast >= 2 && slow >= 2 && signal >= 2 && fast < slow;
+}
+
 self.onmessage = (event) => {
-  const { close, high, low, times, symbol, timeframe, metric, minTrades, maxTrades, labels, labelWindow, labelWeights, requireMacd, macdFast, macdSlow } = event.data;
+  const { close, high, low, times, symbol, timeframe, metric, minTrades, maxTrades, labels, labelWindow, labelWeights, requireMacd, searchMacd, macdFast, macdSlow, macdSignal } = event.data;
   const minT = Math.max(1, Number.isFinite(minTrades) ? minTrades : 1);
   const maxT = Number.isFinite(maxTrades) ? maxTrades : Infinity;
   const useLabels = metric === "label_score" && labels && (labels.entries.length || labels.exits.length);
   const ema = sourceEma(close, 3);
   const sma = sourceSma(close, 3);
   const masks = sessionMasks(times);
-  const macd = requireMacd ? macdLine(close, macdFast || 12, macdSlow || 26) : null;
   const grid = [];
   for (const length of LENGTHS) for (const sigma of SIGMAS) {
-    if (length / sigma <= 5) grid.push({ length, sigma, ratio: length / sigma });
+    if (isValidGmaConfig(length, sigma)) grid.push({ length, sigma, ratio: length / sigma });
   }
   const fastGrid = grid.map((param) => gaussianMA(ema, param.length, param.sigma));
   const slowGrid = grid.map((param) => gaussianMA(sma, param.length, param.sigma));
   const pairs = [];
-  for (let fast = 0; fast < grid.length; fast++) for (let slow = 0; slow < grid.length; slow++) if (grid[fast].length < grid[slow].length && grid[fast].ratio < grid[slow].ratio) pairs.push([fast, slow]);
-  let best = null;
-  for (let i = 0; i < pairs.length; i++) {
-    const [fastIndex, slowIndex] = pairs[i];
-    const stats = score(close, high, low, tradeIndices(fastGrid[fastIndex], slowGrid[slowIndex], masks, macd));
-    let labelBreakdown = null;
-    let value;
-    if (metric === "label_score") {
-      labelBreakdown = useLabels
-        ? scoreLabelSet(labels.entries, labels.exits, stats.entryIndices, stats.exitIndices, labelWindow, labelWeights)
-        : { entryMatches: [], exitMatches: [], entryFalseNegatives: 0, exitFalseNegatives: 0, falsePositives: 0, entryProximitySum: 0, exitProximitySum: 0, totalScore: 0 };
-      value = labelBreakdown.totalScore;
-    } else {
-      value = metric === "total_win_rate" ? (stats.closed ? stats.wins / stats.closed * 100 : 0)
-        : metric === "call_win_rate" ? (stats.longClosed ? stats.longWins / stats.longClosed * 100 : 0)
-        : metric === "put_win_rate" ? (stats.shortClosed ? stats.shortWins / stats.shortClosed * 100 : 0)
-        : metric === "total_profit_pct" ? stats.profitPct
-        : metric === "call_profit_pct" ? stats.longProfitPct
-        : metric === "put_profit_pct" ? stats.shortProfitPct
-        : metric === "max_runup_pct" ? stats.maxRunup
-        : metric === "avg_max_runup_pct" ? stats.avgMaxRunup
-        : (stats.closed ? stats.profitPct / stats.closed : 0);
+  for (let fast = 0; fast < grid.length; fast++) for (let slow = 0; slow < grid.length; slow++) {
+    if (isValidGmaPair(grid[fast], grid[slow])) pairs.push([fast, slow]);
+  }
+  const macdCombos = [];
+  if (requireMacd && searchMacd) {
+    const signal = macdSignal || 9;
+    for (const fast of MACD_FAST) for (const slow of MACD_SLOW) {
+      if (isValidMacdCombo(fast, slow, signal)) macdCombos.push({ fast, slow, signal });
     }
-    if (stats.closed >= minT && stats.closed <= maxT && (!best || value > best.value)) best = { value, fastIndex, slowIndex, stats, labelBreakdown };
-    if (i % 250 === 0 || i === pairs.length - 1) self.postMessage({ type: "progress", pct: 5 + i / pairs.length * 95, frame: i, frames: pairs.length, tested: i + 1, total: pairs.length, timeframe, message: "Testing GMA parameter pairs" });
+  } else if (requireMacd) {
+    const fast = macdFast || 12;
+    const slow = macdSlow || 26;
+    const signal = macdSignal || 9;
+    if (isValidMacdCombo(fast, slow, signal)) macdCombos.push({ fast, slow, signal });
+  } else {
+    macdCombos.push(null);
+  }
+  const totalTrials = pairs.length * macdCombos.length;
+  let best = null;
+  let tested = 0;
+  for (const macdCombo of macdCombos) {
+    const macd = macdCombo ? macdLine(close, macdCombo.fast, macdCombo.slow) : null;
+    for (let i = 0; i < pairs.length; i++) {
+      const [fastIndex, slowIndex] = pairs[i];
+      const stats = macd
+        ? scoreMacdTrades(fastGrid[fastIndex], slowGrid[slowIndex], close, high, low, masks, macd)
+        : score(close, high, low, tradeIndices(fastGrid[fastIndex], slowGrid[slowIndex], masks, null));
+      const scored = metricValue(metric, stats, null, useLabels, labels, labelWindow, labelWeights);
+      if (stats.closed >= minT && stats.closed <= maxT && (!best || scored.value > best.value)) {
+        best = { value: scored.value, fastIndex, slowIndex, stats, labelBreakdown: scored.labelBreakdown, macd: macdCombo };
+      }
+      tested++;
+      if (tested % 250 === 0 || tested === totalTrials) {
+        self.postMessage({
+          type: "progress",
+          pct: 5 + tested / totalTrials * 95,
+          frame: tested,
+          frames: totalTrials,
+          tested,
+          total: totalTrials,
+          timeframe,
+          message: requireMacd && searchMacd ? "Testing GMA and MACD parameter pairs" : "Testing GMA parameter pairs",
+        });
+      }
+    }
   }
   if (!best) throw new Error("No GMA combination produced enough closed trades");
   const s = best.stats;
   self.postMessage({ type: "done", result: {
     symbol, timeframe, metric,
     params: { fast_length: grid[best.fastIndex].length, fast_sigma: grid[best.fastIndex].sigma, slow_length: grid[best.slowIndex].length, slow_sigma: grid[best.slowIndex].sigma },
+    macd_params: best.macd ? { fast: best.macd.fast, slow: best.macd.slow, signal: best.macd.signal } : null,
     win_rate: s.closed ? s.wins / s.closed * 100 : 0,
     call_win_rate: s.longClosed ? s.longWins / s.longClosed * 100 : null,
     put_win_rate: s.shortClosed ? s.shortWins / s.shortClosed * 100 : null,
     profit: s.profit, call_profit: s.longProfit, put_profit: s.shortProfit,
     profit_pct: s.profitPct, call_profit_pct: s.longProfitPct, put_profit_pct: s.shortProfitPct,
     closed_trades: s.closed, close_calls: s.longClosed, close_puts: s.shortClosed,
-    wins: s.wins, call_wins: s.longWins, put_wins: s.shortWins, bars: close.length, tested: pairs.length,
+    wins: s.wins, call_wins: s.longWins, put_wins: s.shortWins, bars: close.length, tested: totalTrials,
     max_runup_pct: s.maxRunup, avg_max_runup_pct: s.avgMaxRunup,
     average_profit_pct: s.closed ? s.profitPct / s.closed : 0,
     label_score: best.labelBreakdown
@@ -293,10 +402,9 @@ export interface LabelScoringOptions {
 }
 
 /** When set, entries require GMA side and MACD line sign to agree. */
-export interface MacdConfirmOptions {
-  fast: number;
-  slow: number;
-}
+export type MacdConfirmOptions =
+  | { mode: "search"; signal: number }
+  | { mode: "fixed"; fast: number; slow: number; signal: number };
 
 function abortError(): DOMException {
   return new DOMException("Optimization cancelled", "AbortError");
@@ -379,8 +487,15 @@ function runSingleOptimize(
         labelWindow: labelScoring?.window ?? DEFAULT_LABEL_WINDOW,
         labelWeights: labelScoring?.weights ?? DEFAULT_LABEL_SCORE_WEIGHTS,
         requireMacd: Boolean(macdConfirm),
-        macdFast: macdConfirm?.fast ?? 12,
-        macdSlow: macdConfirm?.slow ?? 26,
+        searchMacd: macdConfirm?.mode === "search",
+        macdFast: macdConfirm?.mode === "fixed" ? macdConfirm.fast : 12,
+        macdSlow: macdConfirm?.mode === "fixed" ? macdConfirm.slow : 26,
+        macdSignal:
+          macdConfirm?.mode === "search"
+            ? macdConfirm.signal
+            : macdConfirm?.mode === "fixed"
+              ? macdConfirm.signal
+              : 9,
       },
       [close.buffer, high.buffer, low.buffer],
     );

@@ -332,6 +332,7 @@ export interface OptimizeResult {
     slow_length: number;
     slow_sigma: number;
   };
+  macd_params?: { fast: number; slow: number; signal: number } | null;
   win_rate: number;
   call_win_rate: number | null;
   put_win_rate: number | null;

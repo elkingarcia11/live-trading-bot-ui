@@ -11,7 +11,8 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 import { computeMacd } from "./macd";
-import type { Bar, MacdParams, ManualPoint, ManualSelectionMode } from "./types";
+import { ACTION_MARKER_TEXT } from "./tradeStats";
+import type { Action, Bar, MacdParams, ManualPoint, ManualSelectionMode } from "./types";
 
 export type ChartZone = "local" | "et" | "ct" | "utc";
 
@@ -21,6 +22,16 @@ export const CHART_ZONES: { id: ChartZone; label: string; iana?: string }[] = [
   { id: "ct", label: "Exchange CT", iana: "America/Chicago" },
   { id: "utc", label: "UTC", iana: "UTC" },
 ];
+
+const ACTION_MARKER_STYLE: Record<
+  Action,
+  { position: "belowBar" | "aboveBar"; color: string; shape: "arrowUp" | "arrowDown" }
+> = {
+  open_call: { position: "belowBar", color: "#00e676", shape: "arrowUp" },
+  close_call: { position: "aboveBar", color: "#ff5252", shape: "arrowDown" },
+  open_put: { position: "aboveBar", color: "#ff5252", shape: "arrowDown" },
+  close_put: { position: "belowBar", color: "#00e676", shape: "arrowUp" },
+};
 
 interface Props {
   bars: Bar[];
@@ -479,19 +490,19 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
 
     const markers: SeriesMarker<UTCTimestamp>[] = [];
     if (showSignals) {
-      unique
-        .filter((bar) => bar.actions?.length)
-        .forEach((bar) => {
-          const callish =
-            bar.actions!.includes("open_call") || bar.actions!.includes("close_put");
+      unique.forEach((bar) => {
+        for (const action of bar.actions ?? []) {
+          const style = ACTION_MARKER_STYLE[action];
           markers.push({
             time: bar.time as UTCTimestamp,
-            position: (callish ? "belowBar" : "aboveBar") as "belowBar" | "aboveBar",
-            color: callish ? "#00e676" : "#ff5252",
-            shape: (callish ? "arrowUp" : "arrowDown") as "arrowUp" | "arrowDown",
+            position: style.position,
+            color: style.color,
+            shape: style.shape,
             size: 2.5,
+            text: ACTION_MARKER_TEXT[action],
           });
-        });
+        }
+      });
     }
     // Resolve manual entry ($E_k$) / exit ($X_k$) point indices against the
     // unique times used for the series so markers land on the exact bar.

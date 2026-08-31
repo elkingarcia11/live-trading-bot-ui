@@ -54,14 +54,20 @@ export const ACTION_LABEL: Record<Action, string> = {
   close_put: "▲",
 };
 
+export const ACTION_MARKER_TEXT: Record<Action, string> = {
+  open_call: "Long Open",
+  close_call: "Long Close",
+  open_put: "Put Open",
+  close_put: "Put Close",
+};
+
 export function isUpAction(action: Action): boolean {
   return action === "open_call" || action === "close_put";
 }
 
 export function formatActions(actions: Action[] | undefined): string {
   if (!actions?.length) return "—";
-  const marks = [...new Set(actions.map((action) => ACTION_LABEL[action]))];
-  return marks.join(" ");
+  return actions.map((action) => ACTION_MARKER_TEXT[action]).join(" · ");
 }
 
 export interface TradeStats {
@@ -119,7 +125,7 @@ export interface SignalConfig {
 /** Map indicator signals onto open/close call/put actions during RTH only.
  *  GMA only: GMA crossovers (from backend `signal` or session-open sync).
  *  MACD only: MACD line crosses above/below zero.
- *  Both: long requires fast GMA > slow GMA and MACD > 0; short the inverse. */
+ *  Both: open long/short needs GMA side and MACD sign; closes use GMA only. */
 export function withActions(bars: Bar[], config?: SignalConfig): Bar[] {
   const useGma = config?.useGma ?? false;
   const useMacd = config?.useMacd ?? false;
@@ -153,29 +159,74 @@ export function withActions(bars: Bar[], config?: SignalConfig): Bar[] {
       const macdLongPrev = prevMacd != null && prevMacd > 0;
       const macdShortPrev = prevMacd != null && prevMacd < 0;
 
-      let buy = false;
-      let sell = false;
+      let openLong = false;
+      let openShort = false;
+      let gmaBuy = false;
+      let gmaSell = false;
 
       if (useGma && useMacd) {
-        const longNow = gmaLong && macdLong;
-        const shortNow = gmaShort && macdShort;
+        if (bar.signal === "buy") gmaBuy = true;
+        else if (bar.signal === "sell") gmaSell = true;
+        else if (!flags.open[i]) {
+          gmaBuy = gmaLong && !gmaLongPrev;
+          gmaSell = gmaShort && !gmaShortPrev;
+        }
         if (flags.open[i]) {
-          buy = longNow;
-          sell = shortNow;
+          openLong = gmaLong && macdLong;
+          openShort = gmaShort && macdShort;
         } else {
-          buy = longNow && !(gmaLongPrev && macdLongPrev);
-          sell = shortNow && !(gmaShortPrev && macdShortPrev);
+          openLong = gmaLong && macdLong && !(gmaLongPrev && macdLongPrev);
+          openShort = gmaShort && macdShort && !(gmaShortPrev && macdShortPrev);
+        }
+        if (side === "long" && gmaSell) {
+          actions.push("close_call");
+          side = null;
+        }
+        if (side === "short" && gmaBuy) {
+          actions.push("close_put");
+          side = null;
+        }
+        if (side == null && openLong) {
+          actions.push("open_call");
+          side = "long";
+        } else if (side == null && openShort) {
+          actions.push("open_put");
+          side = "short";
         }
       } else if (useGma) {
         if (bar.signal === "buy") {
-          buy = true;
+          gmaBuy = true;
         } else if (bar.signal === "sell") {
-          sell = true;
+          gmaSell = true;
         } else if (flags.open[i] && side == null && bar.gma_fast != null && bar.gma_slow != null) {
-          buy = gmaLong;
-          sell = gmaShort;
+          gmaBuy = gmaLong;
+          gmaSell = gmaShort;
+        } else if (!flags.open[i]) {
+          gmaBuy = gmaLong && !gmaLongPrev;
+          gmaSell = gmaShort && !gmaShortPrev;
+        }
+        if (gmaBuy) {
+          if (side === "short") {
+            actions.push("close_put");
+            side = null;
+          }
+          if (side == null) {
+            actions.push("open_call");
+            side = "long";
+          }
+        } else if (gmaSell) {
+          if (side === "long") {
+            actions.push("close_call");
+            side = null;
+          }
+          if (side == null) {
+            actions.push("open_put");
+            side = "short";
+          }
         }
       } else if (useMacd) {
+        let buy = false;
+        let sell = false;
         if (flags.open[i] && side == null) {
           buy = macdLong;
           sell = macdShort;
@@ -183,25 +234,24 @@ export function withActions(bars: Bar[], config?: SignalConfig): Bar[] {
           buy = macdLong && !macdLongPrev;
           sell = macdShort && !macdShortPrev;
         }
-      }
-
-      if (buy) {
-        if (side === "short") {
-          actions.push("close_put");
-          side = null;
-        }
-        if (side == null) {
-          actions.push("open_call");
-          side = "long";
-        }
-      } else if (sell) {
-        if (side === "long") {
-          actions.push("close_call");
-          side = null;
-        }
-        if (side == null) {
-          actions.push("open_put");
-          side = "short";
+        if (buy) {
+          if (side === "short") {
+            actions.push("close_put");
+            side = null;
+          }
+          if (side == null) {
+            actions.push("open_call");
+            side = "long";
+          }
+        } else if (sell) {
+          if (side === "long") {
+            actions.push("close_call");
+            side = null;
+          }
+          if (side == null) {
+            actions.push("open_put");
+            side = "short";
+          }
         }
       }
     }
