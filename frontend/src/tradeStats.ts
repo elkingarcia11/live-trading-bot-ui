@@ -110,15 +110,82 @@ function esPct(entryPrice: number, price: number, side: PositionSide): number {
   return (esPnl(entryPrice, price, side) / entryPrice) * 100;
 }
 
-/** Map GMA buy/sell crosses onto open/close call/put actions during RTH only. */
-export function withActions(bars: Bar[]): Bar[] {
+export interface SignalConfig {
+  useGma: boolean;
+  useMacd: boolean;
+  macdLine?: Array<number | null>;
+}
+
+/** Map indicator signals onto open/close call/put actions during RTH only.
+ *  GMA only: GMA crossovers (from backend `signal` or session-open sync).
+ *  MACD only: MACD line crosses above/below zero.
+ *  Both: long requires fast GMA > slow GMA and MACD > 0; short the inverse. */
+export function withActions(bars: Bar[], config?: SignalConfig): Bar[] {
+  const useGma = config?.useGma ?? false;
+  const useMacd = config?.useMacd ?? false;
+  const macdLine = config?.macdLine;
+
+  if (!useGma && !useMacd) {
+    return bars.map((bar) => ({ ...bar }));
+  }
+
   const flags = sessionFlags(bars);
   let side: PositionSide | null = null;
   return bars.map((bar, i) => {
     const actions: Action[] = [];
     const canTrade = flags.rth[i] && !flags.close[i];
     if (canTrade) {
-      if (bar.signal === "buy") {
+      const prev = i > 0 ? bars[i - 1] : null;
+      const prevMacd = i > 0 && macdLine ? macdLine[i - 1] : null;
+      const macd = macdLine?.[i] ?? null;
+
+      const gmaLong =
+        bar.gma_fast != null && bar.gma_slow != null && bar.gma_fast > bar.gma_slow;
+      const gmaShort =
+        bar.gma_fast != null && bar.gma_slow != null && bar.gma_fast < bar.gma_slow;
+      const gmaLongPrev =
+        prev?.gma_fast != null && prev?.gma_slow != null && prev.gma_fast > prev.gma_slow;
+      const gmaShortPrev =
+        prev?.gma_fast != null && prev?.gma_slow != null && prev.gma_fast < prev.gma_slow;
+
+      const macdLong = macd != null && macd > 0;
+      const macdShort = macd != null && macd < 0;
+      const macdLongPrev = prevMacd != null && prevMacd > 0;
+      const macdShortPrev = prevMacd != null && prevMacd < 0;
+
+      let buy = false;
+      let sell = false;
+
+      if (useGma && useMacd) {
+        const longNow = gmaLong && macdLong;
+        const shortNow = gmaShort && macdShort;
+        if (flags.open[i]) {
+          buy = longNow;
+          sell = shortNow;
+        } else {
+          buy = longNow && !(gmaLongPrev && macdLongPrev);
+          sell = shortNow && !(gmaShortPrev && macdShortPrev);
+        }
+      } else if (useGma) {
+        if (bar.signal === "buy") {
+          buy = true;
+        } else if (bar.signal === "sell") {
+          sell = true;
+        } else if (flags.open[i] && side == null && bar.gma_fast != null && bar.gma_slow != null) {
+          buy = gmaLong;
+          sell = gmaShort;
+        }
+      } else if (useMacd) {
+        if (flags.open[i] && side == null) {
+          buy = macdLong;
+          sell = macdShort;
+        } else {
+          buy = macdLong && !macdLongPrev;
+          sell = macdShort && !macdShortPrev;
+        }
+      }
+
+      if (buy) {
         if (side === "short") {
           actions.push("close_put");
           side = null;
@@ -127,25 +194,12 @@ export function withActions(bars: Bar[]): Bar[] {
           actions.push("open_call");
           side = "long";
         }
-      } else if (bar.signal === "sell") {
+      } else if (sell) {
         if (side === "long") {
           actions.push("close_call");
           side = null;
         }
         if (side == null) {
-          actions.push("open_put");
-          side = "short";
-        }
-      } else if (
-        flags.open[i] &&
-        side == null &&
-        bar.gma_fast != null &&
-        bar.gma_slow != null
-      ) {
-        if (bar.gma_fast > bar.gma_slow) {
-          actions.push("open_call");
-          side = "long";
-        } else if (bar.gma_fast < bar.gma_slow) {
           actions.push("open_put");
           side = "short";
         }

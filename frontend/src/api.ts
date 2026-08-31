@@ -24,27 +24,34 @@ function query(params: GmaParams): string {
 }
 
 async function readJson<T>(response: Response): Promise<T> {
+  const text = await response.text();
   if (!response.ok) {
     let detail = response.statusText;
-    try {
-      const body = await response.json();
-      if (typeof body.detail === "string") {
-        detail = body.detail;
-      } else if (body.detail !== undefined) {
-        // FastAPI returns an array of validation errors for 422 responses;
-        // stringify it so the message renders (not "[object Object]").
-        detail = typeof body.detail === "string"
-          ? body.detail
-          : JSON.stringify(body.detail);
-      } else {
-        detail = JSON.stringify(body);
+    if (text) {
+      try {
+        const body = JSON.parse(text) as { detail?: unknown };
+        if (typeof body.detail === "string") {
+          detail = body.detail;
+        } else if (body.detail !== undefined) {
+          // FastAPI returns an array of validation errors for 422 responses.
+          detail = JSON.stringify(body.detail);
+        } else {
+          detail = JSON.stringify(body);
+        }
+      } catch {
+        detail = text;
       }
-    } catch {
-      detail = await response.text();
     }
     throw new Error(detail || `HTTP ${response.status}`);
   }
-  return response.json() as Promise<T>;
+  if (!text) {
+    throw new Error(`HTTP ${response.status}: empty response`);
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`Invalid JSON response (${response.status})`);
+  }
 }
 
 export function fetchCatalog(): Promise<CatalogResponse> {

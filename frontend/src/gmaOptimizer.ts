@@ -89,23 +89,49 @@ function sessionMasks(times) {
   return { rth, open, close };
 }
 
-function tradeIndices(fast, slow, masks) {
+function macdLine(close, fastPeriod, slowPeriod) {
+  const fastEma = sourceEma(close, fastPeriod);
+  const slowEma = sourceEma(close, slowPeriod);
+  const out = new Float64Array(close.length).fill(NaN);
+  for (let i = 0; i < close.length; i++) {
+    if (Number.isFinite(fastEma[i]) && Number.isFinite(slowEma[i])) out[i] = fastEma[i] - slowEma[i];
+  }
+  return out;
+}
+
+function tradeIndices(fast, slow, masks, macd) {
   const buy = [];
   const sell = [];
   const flatten = [];
   for (let i = 1; i < fast.length; i++) {
     if (!Number.isFinite(fast[i]) || !Number.isFinite(fast[i - 1]) || !Number.isFinite(slow[i]) || !Number.isFinite(slow[i - 1])) continue;
-    const up = fast[i - 1] <= slow[i - 1] && fast[i] > slow[i];
-    const down = fast[i - 1] >= slow[i - 1] && fast[i] < slow[i];
+    let up, down;
+    if (macd) {
+      if (!Number.isFinite(macd[i]) || !Number.isFinite(macd[i - 1])) continue;
+      const longNow = fast[i] > slow[i] && macd[i] > 0;
+      const longPrev = fast[i - 1] > slow[i - 1] && macd[i - 1] > 0;
+      const shortNow = fast[i] < slow[i] && macd[i] < 0;
+      const shortPrev = fast[i - 1] < slow[i - 1] && macd[i - 1] < 0;
+      up = longNow && !longPrev;
+      down = shortNow && !shortPrev;
+    } else {
+      up = fast[i - 1] <= slow[i - 1] && fast[i] > slow[i];
+      down = fast[i - 1] >= slow[i - 1] && fast[i] < slow[i];
+    }
     if (masks.rth[i] && !masks.close[i] && !masks.open[i]) {
       if (up) buy.push(i);
       if (down) sell.push(i);
     }
   }
   for (let i = 0; i < fast.length; i++) {
-    if (masks.open[i] && !masks.close[i] && Number.isFinite(fast[i]) && Number.isFinite(slow[i])) {
-      if (fast[i] > slow[i]) buy.push(i);
-      if (fast[i] < slow[i]) sell.push(i);
+    if (masks.open[i] && !masks.close[i] && Number.isFinite(fast[i]) && Number.isFinite(slow[i]) && (!macd || Number.isFinite(macd[i]))) {
+      if (macd) {
+        if (fast[i] > slow[i] && macd[i] > 0) buy.push(i);
+        if (fast[i] < slow[i] && macd[i] < 0) sell.push(i);
+      } else {
+        if (fast[i] > slow[i]) buy.push(i);
+        if (fast[i] < slow[i]) sell.push(i);
+      }
     }
     if (masks.close[i]) flatten.push(i);
   }
@@ -161,13 +187,14 @@ function score(close, high, low, events) {
 }
 
 self.onmessage = (event) => {
-  const { close, high, low, times, symbol, timeframe, metric, minTrades, maxTrades, labels, labelWindow, labelWeights } = event.data;
+  const { close, high, low, times, symbol, timeframe, metric, minTrades, maxTrades, labels, labelWindow, labelWeights, requireMacd, macdFast, macdSlow } = event.data;
   const minT = Math.max(1, Number.isFinite(minTrades) ? minTrades : 1);
   const maxT = Number.isFinite(maxTrades) ? maxTrades : Infinity;
   const useLabels = metric === "label_score" && labels && (labels.entries.length || labels.exits.length);
   const ema = sourceEma(close, 3);
   const sma = sourceSma(close, 3);
   const masks = sessionMasks(times);
+  const macd = requireMacd ? macdLine(close, macdFast || 12, macdSlow || 26) : null;
   const grid = [];
   for (const length of LENGTHS) for (const sigma of SIGMAS) {
     if (length / sigma <= 5) grid.push({ length, sigma, ratio: length / sigma });
@@ -179,7 +206,7 @@ self.onmessage = (event) => {
   let best = null;
   for (let i = 0; i < pairs.length; i++) {
     const [fastIndex, slowIndex] = pairs[i];
-    const stats = score(close, high, low, tradeIndices(fastGrid[fastIndex], slowGrid[slowIndex], masks));
+    const stats = score(close, high, low, tradeIndices(fastGrid[fastIndex], slowGrid[slowIndex], masks, macd));
     let labelBreakdown = null;
     let value;
     if (metric === "label_score") {
@@ -265,6 +292,12 @@ export interface LabelScoringOptions {
   weights?: LabelScoreWeights;
 }
 
+/** When set, entries require GMA side and MACD line sign to agree. */
+export interface MacdConfirmOptions {
+  fast: number;
+  slow: number;
+}
+
 function abortError(): DOMException {
   return new DOMException("Optimization cancelled", "AbortError");
 }
@@ -283,6 +316,7 @@ function runSingleOptimize(
   onProgress: (progress: OptimizeProgress) => void,
   labelScoring?: LabelScoringOptions,
   signal?: AbortSignal,
+  macdConfirm?: MacdConfirmOptions | null,
 ): Promise<OptimizeResultWithLabelScore> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -344,6 +378,9 @@ function runSingleOptimize(
         labels: labelScoring?.labels ?? null,
         labelWindow: labelScoring?.window ?? DEFAULT_LABEL_WINDOW,
         labelWeights: labelScoring?.weights ?? DEFAULT_LABEL_SCORE_WEIGHTS,
+        requireMacd: Boolean(macdConfirm),
+        macdFast: macdConfirm?.fast ?? 12,
+        macdSlow: macdConfirm?.slow ?? 26,
       },
       [close.buffer, high.buffer, low.buffer],
     );
@@ -360,6 +397,7 @@ export function runFrontendOptimization(
   onProgress: (progress: OptimizeProgress) => void,
   labelScoring?: LabelScoringOptions,
   signal?: AbortSignal,
+  macdConfirm?: MacdConfirmOptions | null,
 ): Promise<OptimizeResultWithLabelScore> {
   return runSingleOptimize(
     bars,
@@ -371,6 +409,7 @@ export function runFrontendOptimization(
     onProgress,
     labelScoring,
     signal,
+    macdConfirm,
   );
 }
 
@@ -401,6 +440,7 @@ export async function runMultiTimeframeOptimization(
   onProgress: (progress: CrossTfProgress) => void,
   labelScoring?: LabelScoringOptions,
   signal?: AbortSignal,
+  macdConfirm?: MacdConfirmOptions | null,
 ): Promise<CrossTfResult> {
   const total = series.length;
   if (total === 0) throw new Error("No timeframes to optimize");
@@ -476,6 +516,7 @@ export async function runMultiTimeframeOptimization(
           (p) => emitProgress(tfIndex, p),
           labelScoring,
           signal,
+          macdConfirm,
         );
         return { tfIndex, single };
       }),

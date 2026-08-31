@@ -101,6 +101,40 @@ export function clampGmaParams(params: GmaParams): GmaParams {
   };
 }
 
+export interface MacdParams {
+  fast: number;
+  slow: number;
+  signal: number;
+}
+
+export const MACD_PERIOD_MIN = 1;
+export const MACD_FAST_MAX = 50;
+export const MACD_SLOW_MAX = 200;
+export const MACD_SIGNAL_MAX = 50;
+
+export const DEFAULT_MACD_PARAMS: MacdParams = {
+  fast: 12,
+  slow: 26,
+  signal: 9,
+};
+
+export function isValidMacdPair(params: MacdParams): boolean {
+  return (
+    params.fast >= MACD_PERIOD_MIN &&
+    params.slow >= MACD_PERIOD_MIN &&
+    params.signal >= MACD_PERIOD_MIN &&
+    params.fast < params.slow
+  );
+}
+
+export function clampMacdParams(params: MacdParams): MacdParams {
+  return {
+    fast: Math.min(MACD_FAST_MAX, Math.max(MACD_PERIOD_MIN, Math.round(params.fast) || MACD_PERIOD_MIN)),
+    slow: Math.min(MACD_SLOW_MAX, Math.max(MACD_PERIOD_MIN, Math.round(params.slow) || MACD_PERIOD_MIN)),
+    signal: Math.min(MACD_SIGNAL_MAX, Math.max(MACD_PERIOD_MIN, Math.round(params.signal) || MACD_PERIOD_MIN)),
+  };
+}
+
 const TF_SPEC_RE = /^(\d+)(t|s|m|h)$/i;
 const TF_UNIT_SECONDS: Record<string, number> = { t: 0, s: 1, m: 60, h: 3600 };
 

@@ -7,6 +7,8 @@
   --muted: #7d8896;
   --fast: #5b9dff;
   --slow: #ff9f43;
+  --macd: #26c6da;
+  --macd-signal: #e040fb;
   --buy: #00e676;
   --sell: #ff5252;
   --up: #26a69a;
@@ -220,7 +222,60 @@ select {
   margin-top: auto;
 }
 
-.apply-gma {
+.indicators h2 {
+  margin-bottom: 12px;
+}
+
+.indicator {
+  padding: 10px 0 2px;
+}
+
+.indicator + .indicator {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.indicator:not(.active) {
+  opacity: 0.72;
+}
+
+.sidebar label.indicator-toggle {
+  display: flex;
+  grid-template-columns: unset;
+  gap: 8px;
+  align-items: center;
+  margin: 0 0 8px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.sidebar label.indicator-toggle input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--fast);
+  cursor: pointer;
+}
+
+.sidebar label.indicator-toggle.macd input[type="checkbox"] {
+  accent-color: var(--macd);
+}
+
+.indicator-sub {
+  margin: 10px 0 8px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.apply-config {
   display: block;
   width: 100%;
 }
@@ -236,6 +291,41 @@ select {
 
 .gma-optimizer .optimizer-feature {
   margin-bottom: 10px;
+}
+
+.optimizer-indicators {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin-bottom: 10px;
+}
+
+.optimizer-indicators .indicator-toggle {
+  margin: 0;
+}
+
+label.optimizer-toggle.compact {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+label.optimizer-toggle.compact input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--fast);
+  cursor: pointer;
+}
+
+label.optimizer-toggle.compact.macd input[type="checkbox"] {
+  accent-color: var(--macd);
 }
 
 .sidebar .gma-optimizer label.optimizer-feature,
@@ -458,6 +548,15 @@ input[type="range"] {
 .swatch.slow {
   background: var(--slow);
 }
+.swatch.macd {
+  background: var(--macd);
+}
+.swatch.macd-signal {
+  background: var(--macd-signal);
+}
+.swatch.macd-hist {
+  background: linear-gradient(90deg, #26a69a 50%, #ef5350 50%);
+}
 .arrow {
   display: inline-block;
   width: 0;
@@ -640,9 +739,42 @@ input[type="range"] {
   }
 }
 
-.chart-host {
+.chart-stack {
   position: absolute;
   inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.chart-host,
+.macd-host {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+.chart-host {
+  flex: 1 1 auto;
+}
+
+.macd-host {
+  flex: 0 0 24%;
+  min-height: 100px;
+  max-height: 240px;
+  border-top: 1px solid var(--line);
+}
+
+.macd-label {
+  position: absolute;
+  z-index: 2;
+  top: 6px;
+  left: 10px;
+  pointer-events: none;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 select:disabled,
