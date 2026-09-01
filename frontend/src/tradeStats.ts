@@ -119,19 +119,24 @@ function esPct(entryPrice: number, price: number, side: PositionSide): number {
 export interface SignalConfig {
   useGma: boolean;
   useMacd: boolean;
+  useGmaMacd?: boolean;
   macdLine?: Array<number | null>;
+  gmaMacdHist?: Array<number | null>;
 }
 
 /** Map indicator signals onto open/close call/put actions during RTH only.
  *  GMA only: GMA crossovers (from backend `signal` or session-open sync).
  *  MACD only: MACD line crosses above/below zero.
+ *  GMA MACD: histogram crosses above/below zero (hist > 0 long, hist < 0 short).
  *  Both: open long/short needs GMA side and MACD sign; closes use GMA only. */
 export function withActions(bars: Bar[], config?: SignalConfig): Bar[] {
   const useGma = config?.useGma ?? false;
   const useMacd = config?.useMacd ?? false;
+  const useGmaMacd = config?.useGmaMacd ?? false;
   const macdLine = config?.macdLine;
+  const gmaMacdHist = config?.gmaMacdHist;
 
-  if (!useGma && !useMacd) {
+  if (!useGma && !useMacd && !useGmaMacd) {
     return bars.map((bar) => ({ ...bar }));
   }
 
@@ -233,6 +238,41 @@ export function withActions(bars: Bar[], config?: SignalConfig): Bar[] {
         } else {
           buy = macdLong && !macdLongPrev;
           sell = macdShort && !macdShortPrev;
+        }
+        if (buy) {
+          if (side === "short") {
+            actions.push("close_put");
+            side = null;
+          }
+          if (side == null) {
+            actions.push("open_call");
+            side = "long";
+          }
+        } else if (sell) {
+          if (side === "long") {
+            actions.push("close_call");
+            side = null;
+          }
+          if (side == null) {
+            actions.push("open_put");
+            side = "short";
+          }
+        }
+      } else if (useGmaMacd) {
+        const hist = gmaMacdHist?.[i] ?? null;
+        const prevHist = i > 0 && gmaMacdHist ? gmaMacdHist[i - 1] : null;
+        const histLong = hist != null && hist > 0;
+        const histShort = hist != null && hist < 0;
+        const histLongPrev = prevHist != null && prevHist > 0;
+        const histShortPrev = prevHist != null && prevHist < 0;
+        let buy = false;
+        let sell = false;
+        if (flags.open[i] && side == null) {
+          buy = histLong;
+          sell = histShort;
+        } else {
+          buy = histLong && !histLongPrev;
+          sell = histShort && !histShortPrev;
         }
         if (buy) {
           if (side === "short") {

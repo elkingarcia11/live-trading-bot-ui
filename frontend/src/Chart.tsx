@@ -726,7 +726,7 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
         <div className="gma-macd-host" ref={gmaMacdHostRef}>
           {gmaMacdParams && (
             <div className="macd-label">
-              MACD-GMA F {gmaMacdParams.fastLength}/{gmaMacdParams.fastSigma} · S{" "}
+              GMA MACD F {gmaMacdParams.fastLength}/{gmaMacdParams.fastSigma} · S{" "}
               {gmaMacdParams.slowLength}/{gmaMacdParams.slowSigma} · Sig{" "}
               {gmaMacdParams.signalLength}/{gmaMacdParams.signalSigma}
             </div>

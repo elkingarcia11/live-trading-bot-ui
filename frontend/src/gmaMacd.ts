@@ -1,24 +1,7 @@
-/** Traditional MACD with Gaussian MAs (Pine "MACD-GMA" script). */
+/** GMA MACD: fast GMA − slow GMA on close, signal GMA of MACD line, histogram = MACD − signal. */
 
 import type { MacdSeries } from "./macd";
 import type { GmaMacdParams } from "./types";
-
-/** Pine `ta.ema`: seed with SMA of the first `period` values, then α = 2 / (period + 1). */
-function ema(source: number[], period: number): Array<number | null> {
-  const n = source.length;
-  const out: Array<number | null> = Array(n).fill(null);
-  if (period < 1 || n < period) return out;
-  const alpha = 2 / (period + 1);
-  let sum = 0;
-  for (let i = 0; i < period; i++) sum += source[i];
-  out[period - 1] = sum / period;
-  for (let t = period; t < n; t++) {
-    const prev = out[t - 1];
-    if (prev == null) continue;
-    out[t] = alpha * source[t] + (1 - alpha) * prev;
-  }
-  return out;
-}
 
 /** Pine GMA: weights exp(-i²/(2σ²)) on source[0]=current … source[length-1]=oldest. */
 function traditionalGma(source: Array<number | null>, length: number, sigma: number): Array<number | null> {
@@ -50,13 +33,6 @@ function traditionalGma(source: Array<number | null>, length: number, sigma: num
   return out;
 }
 
-function resolveSource(closes: number[], params: GmaMacdParams): Array<number | null> {
-  if (params.source === "ema") {
-    return ema(closes, params.emaLength);
-  }
-  return closes.map((value) => (Number.isFinite(value) ? value : null));
-}
-
 export function computeGmaMacd(closes: number[], params: GmaMacdParams): MacdSeries {
   const n = closes.length;
   const empty: MacdSeries = {
@@ -66,7 +42,7 @@ export function computeGmaMacd(closes: number[], params: GmaMacdParams): MacdSer
   };
   if (n === 0) return empty;
 
-  const src = resolveSource(closes, params);
+  const src = closes.map((value) => (Number.isFinite(value) ? value : null));
   const fastMa = traditionalGma(src, params.fastLength, params.fastSigma);
   const slowMa = traditionalGma(src, params.slowLength, params.slowSigma);
 

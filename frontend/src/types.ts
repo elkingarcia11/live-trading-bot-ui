@@ -135,8 +135,6 @@ export function clampMacdParams(params: MacdParams): MacdParams {
   };
 }
 
-export type GmaMacdSource = "close" | "ema";
-
 export interface GmaMacdParams {
   fastLength: number;
   fastSigma: number;
@@ -144,26 +142,31 @@ export interface GmaMacdParams {
   slowSigma: number;
   signalLength: number;
   signalSigma: number;
-  source: GmaMacdSource;
-  emaLength: number;
 }
 
 export const GMA_MACD_LENGTH_MIN = 1;
-export const GMA_MACD_LENGTH_MAX = 24;
+export const GMA_MACD_LENGTH_MAX = 100;
 export const GMA_MACD_SIGMA_MIN = 1;
-export const GMA_MACD_SIGMA_MAX = 5;
-export const GMA_MACD_EMA_LENGTH_MIN = 1;
+export const GMA_MACD_SIGMA_MAX = 50;
+export const GMA_MACD_SIGNAL_LENGTH_MAX = 15;
+export const GMA_MACD_SCALE_MAX = 3;
 
 export const DEFAULT_GMA_MACD_PARAMS: GmaMacdParams = {
-  fastLength: 9,
-  fastSigma: 2,
-  slowLength: 21,
-  slowSigma: 3,
+  fastLength: 12,
+  fastSigma: 5,
+  slowLength: 26,
+  slowSigma: 9,
   signalLength: 9,
-  signalSigma: 2,
-  source: "close",
-  emaLength: 3,
+  signalSigma: 3,
 };
+
+export function isValidGmaMacdScale(length: number, sigma: number): boolean {
+  return (
+    length >= GMA_MACD_LENGTH_MIN &&
+    sigma >= GMA_MACD_SIGMA_MIN &&
+    length / sigma <= GMA_MACD_SCALE_MAX
+  );
+}
 
 export function gmaMacdFastScale(params: GmaMacdParams): number {
   return params.fastLength / params.fastSigma;
@@ -177,20 +180,33 @@ export function isValidGmaMacdPair(params: GmaMacdParams): boolean {
   return gmaMacdFastScale(params) < gmaMacdSlowScale(params);
 }
 
+export function isValidGmaMacdConfig(params: GmaMacdParams): boolean {
+  return (
+    params.fastLength <= GMA_MACD_LENGTH_MAX &&
+    params.slowLength <= GMA_MACD_LENGTH_MAX &&
+    params.fastSigma <= GMA_MACD_SIGMA_MAX &&
+    params.slowSigma <= GMA_MACD_SIGMA_MAX &&
+    params.signalLength <= GMA_MACD_SIGNAL_LENGTH_MAX &&
+    params.signalSigma <= GMA_MACD_SIGMA_MAX &&
+    isValidGmaMacdScale(params.fastLength, params.fastSigma) &&
+    isValidGmaMacdScale(params.slowLength, params.slowSigma) &&
+    isValidGmaMacdScale(params.signalLength, params.signalSigma) &&
+    isValidGmaMacdPair(params)
+  );
+}
+
 export function clampGmaMacdParams(params: GmaMacdParams): GmaMacdParams {
-  const clampLen = (value: number) =>
-    Math.min(GMA_MACD_LENGTH_MAX, Math.max(GMA_MACD_LENGTH_MIN, Math.round(value) || GMA_MACD_LENGTH_MIN));
+  const clampLen = (value: number, max: number) =>
+    Math.min(max, Math.max(GMA_MACD_LENGTH_MIN, Math.round(value) || GMA_MACD_LENGTH_MIN));
   const clampSig = (value: number) =>
     Math.min(GMA_MACD_SIGMA_MAX, Math.max(GMA_MACD_SIGMA_MIN, Math.round(value) || GMA_MACD_SIGMA_MIN));
   return {
-    fastLength: clampLen(params.fastLength),
+    fastLength: clampLen(params.fastLength, GMA_MACD_LENGTH_MAX),
     fastSigma: clampSig(params.fastSigma),
-    slowLength: clampLen(params.slowLength),
+    slowLength: clampLen(params.slowLength, GMA_MACD_LENGTH_MAX),
     slowSigma: clampSig(params.slowSigma),
-    signalLength: clampLen(params.signalLength),
+    signalLength: clampLen(params.signalLength, GMA_MACD_SIGNAL_LENGTH_MAX),
     signalSigma: clampSig(params.signalSigma),
-    source: params.source === "ema" ? "ema" : "close",
-    emaLength: Math.max(GMA_MACD_EMA_LENGTH_MIN, Math.round(params.emaLength) || GMA_MACD_EMA_LENGTH_MIN),
   };
 }
 
@@ -238,6 +254,19 @@ export const OPTIMIZE_OPTIONS: { id: OptimizeMetric; label: string }[] = [
   { id: "avg_max_runup_pct", label: "Maximize average max run-up %" },
   { id: "average_profit_pct", label: "Maximize average profit %" },
   { id: "label_score", label: "Maximize label score" },
+];
+
+export type GmaMacdOptimizeMetric = Exclude<
+  OptimizeMetric,
+  "label_score" | "call_win_rate" | "put_win_rate" | "call_profit_pct" | "put_profit_pct"
+>;
+
+export const GMA_MACD_OPTIMIZE_OPTIONS: { id: GmaMacdOptimizeMetric; label: string }[] = [
+  { id: "total_win_rate", label: "Maximize total win rate" },
+  { id: "total_profit_pct", label: "Maximize total profit %" },
+  { id: "average_profit_pct", label: "Maximize average profit %" },
+  { id: "max_runup_pct", label: "Maximize max run-up %" },
+  { id: "avg_max_runup_pct", label: "Maximize average max run-up %" },
 ];
 
 /** Metrics offered by the cross-timeframe optimizer in the header. */
@@ -416,6 +445,13 @@ export interface OptimizeResult {
   error?: string;
   viz?: OptimizeViz | null;
   label_score?: LabelScoreBreakdown | null;
+}
+
+export interface GmaMacdOptimizeResult extends OptimizeResult {
+  params: OptimizeResult["params"] & {
+    signal_length: number;
+    signal_sigma: number;
+  };
 }
 
 export interface ResultsCatalog {
