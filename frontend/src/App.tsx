@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Chart, { CHART_ZONES, formatChartTime, type ChartHandle, type ChartZone } from "./Chart";
 import { fetchCatalog, fetchChart, fetchMeta, fetchTimeframes, streamChart, watchUrl } from "./api";
+import { isEmaOptimizationAbort, runEmaOptimization } from "./emaOptimizer";
 import { isGmaMacdOptimizationAbort, runGmaMacdOptimization } from "./gmaMacdOptimizer";
 import { computeDualEma } from "./ema";
 import { computeGmaMacd } from "./gmaMacd";
 import { isOptimizationAbort, runFrontendOptimization, runMultiTimeframeOptimization, type CrossTfProgress, type CrossTfResult, type LabelScoringOptions } from "./gmaOptimizer";
 import SessionStats, { emaWarmupBars, gmaWarmupBars } from "./SessionStats";
-import { CROSS_TF_OPTIMIZE_OPTIONS, CUSTOM_TIMEFRAME, DEFAULT_EMA_PARAMS, DEFAULT_GMA_MACD_PARAMS, DEFAULT_MANUAL_WINDOW, DEFAULT_PARAMS, EMA_LENGTH_MAX, EMA_LENGTH_MIN, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_MACD_LENGTH_MAX, GMA_MACD_LENGTH_MIN, GMA_MACD_OPTIMIZE_OPTIONS, GMA_MACD_SIGMA_MAX, GMA_MACD_SIGMA_MIN, GMA_MACD_SIGNAL_LENGTH_MAX, GMA_SIGMA_MAX, GMA_SIGMA_MIN, clampEmaParams, clampGmaMacdParams, clampGmaParams, gmaMacdFastScale, gmaMacdSlowScale, gmaScale, isValidEmaPair, isValidGmaMacdConfig, isValidGmaPair, isValidTimeframeSpec, normalizeTimeframeSpec, OPTIMIZE_OPTIONS, type Bar, type EmaParams, type GmaMacdOptimizeMetric, type GmaMacdOptimizeResult, type GmaMacdParams, type GmaParams, type LoadProgress, type ManualEntryWindow, type ManualPoint, type ManualSelectionMode, type OptimizeMetric, type OptimizeProgress, type OptimizeResult } from "./types";
+import { CROSS_TF_OPTIMIZE_OPTIONS, CUSTOM_TIMEFRAME, DEFAULT_EMA_PARAMS, DEFAULT_GMA_MACD_PARAMS, DEFAULT_MANUAL_WINDOW, DEFAULT_PARAMS, EMA_LENGTH_MAX, EMA_LENGTH_MIN, EMA_OPTIMIZE_OPTIONS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_MACD_LENGTH_MAX, GMA_MACD_LENGTH_MIN, GMA_MACD_OPTIMIZE_OPTIONS, GMA_MACD_SIGMA_MAX, GMA_MACD_SIGMA_MIN, GMA_MACD_SIGNAL_LENGTH_MAX, GMA_SIGMA_MAX, GMA_SIGMA_MIN, clampEmaParams, clampGmaMacdParams, clampGmaParams, gmaMacdFastScale, gmaMacdSlowScale, gmaScale, isValidEmaPair, isValidGmaMacdConfig, isValidGmaPair, isValidTimeframeSpec, normalizeTimeframeSpec, OPTIMIZE_OPTIONS, type Bar, type EmaOptimizeMetric, type EmaOptimizeResult, type EmaParams, type GmaMacdOptimizeMetric, type GmaMacdOptimizeResult, type GmaMacdParams, type GmaParams, type LoadProgress, type ManualEntryWindow, type ManualPoint, type ManualSelectionMode, type OptimizeMetric, type OptimizeProgress, type OptimizeResult } from "./types";
 
 import { computeTradeStats, withActions, type SignalConfig } from "./tradeStats";
 
@@ -57,6 +58,21 @@ function gmaMacdOptimizationLabel(metric: GmaMacdOptimizeMetric): string {
   return GMA_MACD_OPTIMIZE_OPTIONS.find((option) => option.id === metric)?.label.replace("Maximize ", "") ?? metric;
 }
 
+function emaOptimizationScore(result: EmaOptimizeResult, metric: EmaOptimizeMetric): string {
+  const value = {
+    total_win_rate: result.win_rate,
+    total_profit_pct: result.profit_pct,
+    max_runup_pct: result.max_runup_pct,
+    avg_max_runup_pct: result.avg_max_runup_pct,
+    average_profit_pct: result.average_profit_pct,
+  }[metric];
+  return value == null ? "—" : `${value.toFixed(metric === "total_win_rate" ? 1 : 2)}%`;
+}
+
+function emaOptimizationLabel(metric: EmaOptimizeMetric): string {
+  return EMA_OPTIMIZE_OPTIONS.find((option) => option.id === metric)?.label.replace("Maximize ", "") ?? metric;
+}
+
 export default function App() {
   const [catalog, setCatalog] = useState<Record<string, string[]>>({});
   const [timeframesBySymbol, setTimeframesBySymbol] = useState<Record<string, string[]>>({});
@@ -97,6 +113,10 @@ export default function App() {
   const [gmaMacdOptimizationProgress, setGmaMacdOptimizationProgress] = useState<OptimizeProgress | null>(null);
   const [gmaMacdOptimizationResult, setGmaMacdOptimizationResult] = useState<GmaMacdOptimizeResult | null>(null);
   const [gmaMacdOptimizing, setGmaMacdOptimizing] = useState(false);
+  const [emaOptimizationFeature, setEmaOptimizationFeature] = useState<EmaOptimizeMetric>("total_profit_pct");
+  const [emaOptimizationProgress, setEmaOptimizationProgress] = useState<OptimizeProgress | null>(null);
+  const [emaOptimizationResult, setEmaOptimizationResult] = useState<EmaOptimizeResult | null>(null);
+  const [emaOptimizing, setEmaOptimizing] = useState(false);
   const [activeSidebarTab, setActiveSidebarTab] = useState<SidebarTab>("gma");
   const [configGma, setConfigGma] = useState(true);
   const [optimizeGma, setOptimizeGma] = useState(true);
@@ -112,6 +132,7 @@ export default function App() {
   const chartHandleRef = useRef<ChartHandle | null>(null);
   const gmaOptAbortRef = useRef<AbortController | null>(null);
   const gmaMacdOptAbortRef = useRef<AbortController | null>(null);
+  const emaOptAbortRef = useRef<AbortController | null>(null);
   const crossTfAbortRef = useRef<AbortController | null>(null);
   const customModeRef = useRef(customMode);
   customModeRef.current = customMode;
@@ -390,6 +411,15 @@ export default function App() {
     setGmaMacdOptimizationProgress(null);
   }, []);
 
+  const cancelEmaOptimize = useCallback(() => {
+    const controller = emaOptAbortRef.current;
+    if (!controller) return;
+    emaOptAbortRef.current = null;
+    controller.abort();
+    setEmaOptimizing(false);
+    setEmaOptimizationProgress(null);
+  }, []);
+
   const cancelCrossTfOptimize = useCallback(() => {
     const controller = crossTfAbortRef.current;
     if (!controller) return;
@@ -402,8 +432,9 @@ export default function App() {
   const cancelInFlightOptimization = useCallback(() => {
     cancelGmaOptimize();
     cancelGmaMacdOptimize();
+    cancelEmaOptimize();
     cancelCrossTfOptimize();
-  }, [cancelGmaOptimize, cancelGmaMacdOptimize, cancelCrossTfOptimize]);
+  }, [cancelGmaOptimize, cancelGmaMacdOptimize, cancelEmaOptimize, cancelCrossTfOptimize]);
 
   const resetSeriesControls = () => {
     setDraft(DEFAULT_PARAMS);
@@ -419,6 +450,8 @@ export default function App() {
     setOptimizationResult(null);
     setGmaMacdOptimizationProgress(null);
     setGmaMacdOptimizationResult(null);
+    setEmaOptimizationProgress(null);
+    setEmaOptimizationResult(null);
   };
 
   const applyCustomTimeframe = () => {
@@ -516,8 +549,52 @@ export default function App() {
   };
 
   const applyEmaConfiguration = () => {
-    if (locked || !emaPairOk || !symbol || !effectiveTf || busy) return;
+    if (locked || !emaPairOk || !symbol || !effectiveTf || busy || emaOptimizing) return;
     setEmaDraft(clampEmaParams(emaDraft));
+    setEmaApplied(true);
+  };
+
+  const optimizeEmas = async () => {
+    if (locked || !symbol || !effectiveTf || busy || emaOptimizing) return;
+    emaOptAbortRef.current?.abort();
+    const controller = new AbortController();
+    emaOptAbortRef.current = controller;
+    setEmaOptimizing(true);
+    setEmaOptimizationProgress(null);
+    setEmaOptimizationResult(null);
+    setError(null);
+    try {
+      const result = await runEmaOptimization(
+        bars,
+        symbol,
+        effectiveTf,
+        emaOptimizationFeature,
+        minTrades,
+        maxTrades,
+        (progress) => setEmaOptimizationProgress(progress),
+        controller.signal,
+      );
+      if (emaOptAbortRef.current !== controller) return;
+      setEmaOptimizationResult(result);
+    } catch (err) {
+      if (isEmaOptimizationAbort(err) || emaOptAbortRef.current !== controller) return;
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (emaOptAbortRef.current === controller) {
+        emaOptAbortRef.current = null;
+        setEmaOptimizing(false);
+        setEmaOptimizationProgress(null);
+      }
+    }
+  };
+
+  const applyOptimizedEmas = () => {
+    if (!emaOptimizationResult) return;
+    const best = clampEmaParams({
+      fast: emaOptimizationResult.params.fast_length,
+      slow: emaOptimizationResult.params.slow_length,
+    });
+    setEmaDraft(best);
     setEmaApplied(true);
   };
 
@@ -1361,11 +1438,111 @@ export default function App() {
           <button
             type="button"
             className="optimize apply-config"
-            disabled={locked || !emaPairOk || !symbol || !effectiveTf || busy}
+            disabled={locked || !emaPairOk || !symbol || !effectiveTf || busy || emaOptimizing}
             onClick={applyEmaConfiguration}
           >
             Apply to Chart
           </button>
+        </section>
+        <section className="gma-optimizer">
+          <h2>Optimize</h2>
+          <p className="hint">
+            Grid-search fast and slow EMA lengths (1–100, fast &lt; slow)
+          </p>
+          <label className="optimizer-feature">
+            Feature
+            <select
+              value={emaOptimizationFeature}
+              disabled={locked || busy || emaOptimizing || !symbol || !effectiveTf}
+              onChange={(event) => {
+                setEmaOptimizationFeature(event.target.value as EmaOptimizeMetric);
+                setEmaOptimizationResult(null);
+              }}
+            >
+              {EMA_OPTIMIZE_OPTIONS.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label.replace("Maximize ", "")}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="trade-filter">
+            <label>
+              Min trades
+              <input
+                type="number"
+                min={1}
+                value={minTrades}
+                disabled={locked || busy || emaOptimizing || !symbol || !effectiveTf}
+                onChange={(e) => setMinTrades(Math.max(1, Number(e.target.value) || 1))}
+              />
+            </label>
+            <label>
+              Max trades
+              <input
+                type="number"
+                min={1}
+                value={maxTrades ?? ""}
+                placeholder="None"
+                disabled={locked || busy || emaOptimizing || !symbol || !effectiveTf}
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  setMaxTrades(raw === "" ? null : Math.max(1, Number(raw) || 1));
+                }}
+              />
+            </label>
+          </div>
+          <div className="optimizer-actions">
+            <button
+              type="button"
+              className="optimize"
+              disabled={locked || busy || emaOptimizing || !symbol || !effectiveTf}
+              onClick={optimizeEmas}
+            >
+              {emaOptimizing
+                ? emaOptimizationProgress
+                  ? `Optimizing ${Math.round(emaOptimizationProgress.pct)}%`
+                  : "Starting optimization…"
+                : "Optimize EMA"}
+            </button>
+            {emaOptimizing && (
+              <button
+                type="button"
+                className="optimize cancel-optimize"
+                onClick={cancelEmaOptimize}
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+          {emaOptimizationResult && (
+            <div className="optimizer-result">
+              <div className="optimizer-score">
+                <span>Best {emaOptimizationLabel(emaOptimizationFeature)}</span>
+                <strong>
+                  {emaOptimizationScore(emaOptimizationResult, emaOptimizationFeature)}
+                </strong>
+              </div>
+              <dl className="optimizer-params">
+                <div>
+                  <dt>Fast EMA</dt>
+                  <dd>L {emaOptimizationResult.params.fast_length}</dd>
+                </div>
+                <div>
+                  <dt>Slow EMA</dt>
+                  <dd>L {emaOptimizationResult.params.slow_length}</dd>
+                </div>
+              </dl>
+              <button
+                type="button"
+                className="optimize apply-config"
+                disabled={busy || emaOptimizing}
+                onClick={applyOptimizedEmas}
+              >
+                Apply Best Configuration
+              </button>
+            </div>
+          )}
         </section>
         <SessionStats
           stats={emaTradeStats}

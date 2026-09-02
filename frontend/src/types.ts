@@ -301,6 +301,9 @@ export const GMA_MACD_OPTIMIZE_OPTIONS: { id: GmaMacdOptimizeMetric; label: stri
   { id: "avg_max_runup_pct", label: "Maximize average max run-up %" },
 ];
 
+export type EmaOptimizeMetric = GmaMacdOptimizeMetric;
+export const EMA_OPTIMIZE_OPTIONS = GMA_MACD_OPTIMIZE_OPTIONS;
+
 /** Metrics offered by the cross-timeframe optimizer in the header. */
 export const CROSS_TF_OPTIMIZE_OPTIONS: {
   id: OptimizeMetric;
@@ -485,6 +488,8 @@ export interface GmaMacdOptimizeResult extends OptimizeResult {
     signal_sigma: number;
   };
 }
+
+export interface EmaOptimizeResult extends OptimizeResult {}
 
 export interface ResultsCatalog {
   symbols: Record<
