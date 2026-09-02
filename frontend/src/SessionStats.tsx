@@ -151,3 +151,7 @@ export default function SessionStats({
 export function gmaWarmupBars(params: GmaParams): number {
   return Math.max(params.fastLength, params.slowLength);
 }
+
+export function emaWarmupBars(fast: number, slow: number): number {
+  return Math.max(fast, slow);
+}

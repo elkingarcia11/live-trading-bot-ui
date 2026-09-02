@@ -101,6 +101,38 @@ export function clampGmaParams(params: GmaParams): GmaParams {
   };
 }
 
+export interface EmaParams {
+  fast: number;
+  slow: number;
+}
+
+export const EMA_LENGTH_MIN = 1;
+export const EMA_LENGTH_MAX = 100;
+
+export const DEFAULT_EMA_PARAMS: EmaParams = {
+  fast: 12,
+  slow: 26,
+};
+
+export function isValidEmaPair(params: EmaParams): boolean {
+  return (
+    params.fast >= EMA_LENGTH_MIN &&
+    params.slow >= EMA_LENGTH_MIN &&
+    params.fast <= EMA_LENGTH_MAX &&
+    params.slow <= EMA_LENGTH_MAX &&
+    params.fast < params.slow
+  );
+}
+
+export function clampEmaParams(params: EmaParams): EmaParams {
+  const clampLen = (value: number) =>
+    Math.min(EMA_LENGTH_MAX, Math.max(EMA_LENGTH_MIN, Math.round(value) || EMA_LENGTH_MIN));
+  return {
+    fast: clampLen(params.fast),
+    slow: clampLen(params.slow),
+  };
+}
+
 export interface MacdParams {
   fast: number;
   slow: number;

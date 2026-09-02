@@ -197,6 +197,80 @@ function scoreMacdTrades(fast, slow, close, high, low, masks, macd) {
   return { closed, wins, longClosed, shortClosed, longWins, shortWins, profit, longProfit, shortProfit, profitPct, longProfitPct, shortProfitPct, maxRunup, avgMaxRunup: closed ? totalRunup / closed : 0, entryIndices, exitIndices };
 }
 
+function scoreDualMaTrades(fast, slow, close, high, low, masks) {
+  const LONG_ABOVE_SLOW = 1.5;
+  const SHORT_BELOW_FAST = 1.5;
+  const EXTREME_VS_SLOW = 3;
+  let side = 0, entry = 0;
+  let closed = 0, wins = 0, longClosed = 0, shortClosed = 0, longWins = 0, shortWins = 0;
+  let profit = 0, longProfit = 0, shortProfit = 0, profitPct = 0, longProfitPct = 0, shortProfitPct = 0;
+  let tradeRunup = 0, maxRunup = 0, totalRunup = 0;
+  const entryIndices = [];
+  const exitIndices = [];
+  const closeTrade = (price, index) => {
+    if (!side) return;
+    const pnl = side === 1 ? price - entry : entry - price;
+    const pct = entry === 0 ? 0 : pnl / entry * 100;
+    closed++; wins += pnl > 0 ? 1 : 0; profit += pnl; profitPct += pct;
+    if (tradeRunup > maxRunup) maxRunup = tradeRunup;
+    totalRunup += tradeRunup;
+    if (side === 1) {
+      longClosed++; longWins += pnl > 0 ? 1 : 0; longProfit += pnl; longProfitPct += pct;
+    } else {
+      shortClosed++; shortWins += pnl > 0 ? 1 : 0; shortProfit += pnl; shortProfitPct += pct;
+    }
+    exitIndices.push(index);
+    side = 0;
+    tradeRunup = 0;
+  };
+  for (let i = 0; i < fast.length; i++) {
+    if (side === 1) tradeRunup = Math.max(tradeRunup, (high[i] - entry) / entry * 100);
+    else if (side === -1) tradeRunup = Math.max(tradeRunup, (entry - low[i]) / entry * 100);
+    if (masks.close[i]) {
+      if (side) closeTrade(close[i], i);
+      continue;
+    }
+    if (!masks.rth[i]) continue;
+    if (!Number.isFinite(fast[i]) || !Number.isFinite(slow[i]) || !Number.isFinite(close[i])) continue;
+    const maLong = fast[i] > slow[i];
+    const maShort = fast[i] < slow[i];
+    const maLongPrev = i > 0 && Number.isFinite(fast[i - 1]) && Number.isFinite(slow[i - 1]) && fast[i - 1] > slow[i - 1];
+    const maShortPrev = i > 0 && Number.isFinite(fast[i - 1]) && Number.isFinite(slow[i - 1]) && fast[i - 1] < slow[i - 1];
+    let crossBuy = false;
+    let crossSell = false;
+    if (masks.open[i] && !side) {
+      crossBuy = maLong;
+      crossSell = maShort;
+    } else if (!masks.open[i]) {
+      crossBuy = maLong && !maLongPrev;
+      crossSell = maShort && !maShortPrev;
+    }
+    const longOk = close[i] >= slow[i] + LONG_ABOVE_SLOW;
+    const shortOk = close[i] <= fast[i] - SHORT_BELOW_FAST;
+    const above3 = close[i] >= slow[i] + EXTREME_VS_SLOW;
+    const below3 = close[i] <= slow[i] - EXTREME_VS_SLOW;
+    const prevAbove3 = i > 0 && Number.isFinite(close[i - 1]) && Number.isFinite(slow[i - 1]) && close[i - 1] >= slow[i - 1] + EXTREME_VS_SLOW;
+    const prevBelow3 = i > 0 && Number.isFinite(close[i - 1]) && Number.isFinite(slow[i - 1]) && close[i - 1] <= slow[i - 1] - EXTREME_VS_SLOW;
+    const extremeLong = masks.open[i] ? above3 : above3 && !prevAbove3;
+    const extremeShort = masks.open[i] ? below3 : below3 && !prevBelow3;
+    let buy = extremeLong || (crossBuy && longOk);
+    let sell = extremeShort || (crossSell && shortOk);
+    if (extremeLong) sell = false;
+    if (extremeShort) buy = false;
+    const price = close[i];
+    if (side === -1 && (crossBuy || buy)) closeTrade(price, i);
+    if (side === 1 && (crossSell || sell)) closeTrade(price, i);
+    if (!side && buy) {
+      entry = price; side = 1; entryIndices.push(i);
+      tradeRunup = Math.max(0, (high[i] - price) / price * 100);
+    } else if (!side && sell) {
+      entry = price; side = -1; entryIndices.push(i);
+      tradeRunup = Math.max(0, (price - low[i]) / price * 100);
+    }
+  }
+  return { closed, wins, longClosed, shortClosed, longWins, shortWins, profit, longProfit, shortProfit, profitPct, longProfitPct, shortProfitPct, maxRunup, avgMaxRunup: closed ? totalRunup / closed : 0, entryIndices, exitIndices };
+}
+
 function score(close, high, low, events) {
   let bi = 0, si = 0, fi = 0, side = 0, entry = 0;
   let closed = 0, wins = 0, longClosed = 0, shortClosed = 0, longWins = 0, shortWins = 0;
@@ -298,7 +372,7 @@ self.onmessage = (event) => {
     const [fastIndex, slowIndex] = pairs[i];
     const stats = macd
       ? scoreMacdTrades(fastGrid[fastIndex], slowGrid[slowIndex], close, high, low, masks, macd)
-      : score(close, high, low, tradeIndices(fastGrid[fastIndex], slowGrid[slowIndex], masks, null));
+      : scoreDualMaTrades(fastGrid[fastIndex], slowGrid[slowIndex], close, high, low, masks);
     const scored = metricValue(metric, stats, null, useLabels, labels, labelWindow, labelWeights);
     if (stats.closed >= minT && stats.closed <= maxT && (!best || scored.value > best.value)) {
       best = { value: scored.value, fastIndex, slowIndex, stats, labelBreakdown: scored.labelBreakdown };

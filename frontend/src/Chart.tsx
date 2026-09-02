@@ -10,10 +10,11 @@ import {
   type SeriesMarker,
   type UTCTimestamp,
 } from "lightweight-charts";
+import { computeDualEma } from "./ema";
 import { computeGmaMacd } from "./gmaMacd";
 import { computeMacd } from "./macd";
 import { ACTION_MARKER_TEXT } from "./tradeStats";
-import type { Action, Bar, GmaMacdParams, MacdParams, ManualPoint, ManualSelectionMode } from "./types";
+import type { Action, Bar, EmaParams, GmaMacdParams, MacdParams, ManualPoint, ManualSelectionMode } from "./types";
 
 export type ChartZone = "local" | "et" | "ct" | "utc";
 
@@ -40,9 +41,11 @@ interface Props {
   timeZone: ChartZone;
   showIndicators: boolean;
   showMacd?: boolean;
+  showEma?: boolean;
   showGmaMacd?: boolean;
   showSignals?: boolean;
   macdParams?: MacdParams;
+  emaParams?: EmaParams;
   gmaMacdParams?: GmaMacdParams;
   /** When not "off", a click on the chart adds/removes a selection point. */
   selectionMode?: ManualSelectionMode;
@@ -66,6 +69,8 @@ const MACD_SIGNAL = "#e040fb";
 const MACD_HIST_UP = "rgba(38, 166, 154, 0.75)";
 const MACD_HIST_DOWN = "rgba(239, 83, 80, 0.75)";
 
+const EMA_FAST = "#26c6da";
+const EMA_SLOW = "#e040fb";
 const GMA_MACD_LINE = "#2196F3";
 const GMA_MACD_SIGNAL = "#FF6D00";
 const GMA_MACD_HIST_UP = "rgba(76, 175, 80, 0.4)";
@@ -158,9 +163,11 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
     timeZone,
     showIndicators,
     showMacd = false,
+    showEma = false,
     showGmaMacd = false,
     showSignals = false,
     macdParams,
+    emaParams,
     gmaMacdParams,
     selectionMode = "off",
     entryPoints = [],
@@ -178,6 +185,8 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const fastRef = useRef<ISeriesApi<"Line"> | null>(null);
   const slowRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const emaFastRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const emaSlowRef = useRef<ISeriesApi<"Line"> | null>(null);
   const volumeRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const macdLineRef = useRef<ISeriesApi<"Line"> | null>(null);
   const macdSignalRef = useRef<ISeriesApi<"Line"> | null>(null);
@@ -295,6 +304,20 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
       lastValueVisible: true,
       priceLineVisible: false,
     });
+    const emaFast = chart.addLineSeries({
+      color: EMA_FAST,
+      lineWidth: 2,
+      title: "Fast EMA",
+      lastValueVisible: true,
+      priceLineVisible: false,
+    });
+    const emaSlow = chart.addLineSeries({
+      color: EMA_SLOW,
+      lineWidth: 2,
+      title: "Slow EMA",
+      lastValueVisible: true,
+      priceLineVisible: false,
+    });
     const volume = chart.addHistogramSeries({
       priceFormat: { type: "volume" },
       priceScaleId: "volume",
@@ -308,6 +331,8 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
     candleRef.current = candles;
     fastRef.current = fast;
     slowRef.current = slow;
+    emaFastRef.current = emaFast;
+    emaSlowRef.current = emaSlow;
     volumeRef.current = volume;
 
     chart.subscribeClick((param: MouseEventParams) => {
@@ -541,6 +566,8 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
       candleRef.current.setData([]);
       fastRef.current.setData([]);
       slowRef.current.setData([]);
+      emaFastRef.current?.setData([]);
+      emaSlowRef.current?.setData([]);
       volumeRef.current.setData([]);
       candleRef.current.setMarkers([]);
       macdLineRef.current?.setData([]);
@@ -577,6 +604,15 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
             .map((bar) => ({ time: bar.time as UTCTimestamp, value: bar.gma_slow as number }))
         : []
     );
+    if (showEma && emaParams && emaFastRef.current && emaSlowRef.current) {
+      const times = unique.map((bar) => bar.time);
+      const series = computeDualEma(unique.map((bar) => bar.close), emaParams.fast, emaParams.slow);
+      emaFastRef.current.setData(lineOrWhitespace(times, series.fast));
+      emaSlowRef.current.setData(lineOrWhitespace(times, series.slow));
+    } else {
+      emaFastRef.current?.setData([]);
+      emaSlowRef.current?.setData([]);
+    }
     volumeRef.current.setData(
       unique.map((bar) => ({
         time: bar.time as UTCTimestamp,
@@ -693,8 +729,10 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
     showIndicators,
     showSignals,
     showMacd,
+    showEma,
     showGmaMacd,
     macdParams,
+    emaParams,
     gmaMacdParams,
     entryPoints,
     exitPoints,

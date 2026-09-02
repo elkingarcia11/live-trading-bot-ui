@@ -9,6 +9,8 @@
   --slow: #ff9f43;
   --macd: #26c6da;
   --macd-signal: #e040fb;
+  --ema-fast: #26c6da;
+  --ema-slow: #e040fb;
   --buy: #00e676;
   --sell: #ff5252;
   --up: #26a69a;
@@ -596,6 +598,12 @@ input[type="range"] {
 }
 .swatch.macd-hist {
   background: linear-gradient(90deg, #26a69a 50%, #ef5350 50%);
+}
+.swatch.ema-fast {
+  background: var(--ema-fast);
+}
+.swatch.ema-slow {
+  background: var(--ema-slow);
 }
 .swatch.gma-macd {
   background: #2196f3;
