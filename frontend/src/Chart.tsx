@@ -14,7 +14,7 @@ import { computeDualEma } from "./ema";
 import { computeGmaMacd } from "./gmaMacd";
 import { computeMacd } from "./macd";
 import { ACTION_MARKER_TEXT } from "./tradeStats";
-import type { Action, Bar, EmaParams, GmaMacdParams, MacdParams, ManualPoint, ManualSelectionMode } from "./types";
+import type { Action, Bar, EmaParams, GmaMacdParams, GmaParams, MacdParams, ManualPoint, ManualSelectionMode } from "./types";
 
 export type ChartZone = "local" | "et" | "ct" | "utc";
 
@@ -46,6 +46,7 @@ interface Props {
   showSignals?: boolean;
   macdParams?: MacdParams;
   emaParams?: EmaParams;
+  gmaParams?: GmaParams;
   gmaMacdParams?: GmaMacdParams;
   /** When not "off", a click on the chart adds/removes a selection point. */
   selectionMode?: ManualSelectionMode;
@@ -120,6 +121,7 @@ function dateOpts(zone: ChartZone, withDate: boolean): Intl.DateTimeFormatOption
     minute: "2-digit",
     second: "2-digit",
     hour12: false,
+    hourCycle: "h23",
     timeZoneName: "short",
     ...(withDate ? { month: "short", day: "numeric" } : {}),
     ...(iana ? { timeZone: iana } : {}),
@@ -168,6 +170,7 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
     showSignals = false,
     macdParams,
     emaParams,
+    gmaParams,
     gmaMacdParams,
     selectionMode = "off",
     entryPoints = [],
@@ -750,7 +753,24 @@ const Chart = forwardRef<ChartHandle, Props>(function Chart(
 
   return (
     <div className={stackClass}>
-      <div className="chart-host" ref={hostRef} />
+      <div className="chart-host" ref={hostRef}>
+        {(showIndicators || showEma) && (
+          <div className="macd-label">
+            {showIndicators && gmaParams && (
+              <>
+                GMA F {gmaParams.fastLength}/{gmaParams.fastSigma} · S{" "}
+                {gmaParams.slowLength}/{gmaParams.slowSigma}
+              </>
+            )}
+            {showIndicators && showEma && gmaParams && emaParams ? " · " : null}
+            {showEma && emaParams && (
+              <>
+                EMA {emaParams.fast}/{emaParams.slow}
+              </>
+            )}
+          </div>
+        )}
+      </div>
       {showMacd && (
         <div className="macd-host" ref={macdHostRef}>
           {macdParams && (

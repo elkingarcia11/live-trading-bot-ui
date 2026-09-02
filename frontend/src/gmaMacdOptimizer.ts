@@ -60,7 +60,12 @@ function sessionMasks(times) {
     const parts = ET_FORMAT.formatToParts(new Date(times[i] * 1000));
     const get = (type) => parts.find((part) => part.type === type)?.value || "0";
     const date = get("year") + get("month") + get("day");
-    const minutes = Number(get("hour")) * 60 + Number(get("minute"));
+    let hour = Number(get("hour"));
+    const period = (parts.find((part) => part.type === "dayPeriod")?.value || "").toLowerCase();
+    if (period.startsWith("p") && hour < 12) hour += 12;
+    if (period.startsWith("a") && hour === 12) hour = 0;
+    if (hour === 24) hour = 0;
+    const minutes = hour * 60 + Number(get("minute"));
     dates[i] = date;
     rth[i] = minutes >= 570 && minutes < 960 ? 1 : 0;
     open[i] = rth[i] && (i === 0 || !rth[i - 1] || dates[i] !== dates[i - 1]) ? 1 : 0;
@@ -145,6 +150,16 @@ function buildGrid(lengths) {
   return grid;
 }
 
+function buildSignalGrid() {
+  const grid = [];
+  for (const length of SIGNAL_LENGTHS) {
+    for (const sigma of SIGMAS) {
+      grid.push({ length, sigma, ratio: length / sigma });
+    }
+  }
+  return grid;
+}
+
 function packResult(symbol, timeframe, metric, closeLen, totalTrials, fast, slow, sig, s) {
   return {
     symbol, timeframe, metric,
@@ -175,7 +190,7 @@ self.onmessage = (event) => {
     const masks = sessionMasks(times);
     const fastGrid = buildGrid(LENGTHS);
     const slowGrid = fastGrid;
-    const signalGrid = buildGrid(SIGNAL_LENGTHS);
+    const signalGrid = buildSignalGrid();
     const myFasts = [];
     for (let fi = 0; fi < fastGrid.length; fi++) {
       if (fi % workerCount === workerIndex) myFasts.push(fi);
@@ -184,7 +199,7 @@ self.onmessage = (event) => {
     let shardTotal = 0;
     for (let fi = 0; fi < fastGrid.length; fi++) {
       for (let si = 0; si < slowGrid.length; si++) {
-        if (fastGrid[fi].ratio >= slowGrid[si].ratio) continue;
+        if (fastGrid[fi].length >= slowGrid[si].length || fastGrid[fi].ratio >= slowGrid[si].ratio) continue;
         totalTrials += signalGrid.length;
         if (fi % workerCount === workerIndex) shardTotal += signalGrid.length;
       }
@@ -228,7 +243,7 @@ self.onmessage = (event) => {
         const fast = fastGrid[fi];
         const fastMa = traditionalGma(close, fast.length, fast.sigma);
         for (let si = slowStart; si < slowEnd; si++) {
-          if (fast.ratio >= slowGrid[si].ratio) continue;
+          if (fast.length >= slowGrid[si].length || fast.ratio >= slowGrid[si].ratio) continue;
           const slowMa = slowMas[si - slowStart];
           for (let i = 0; i < n; i++) macd[i] = fastMa[i] - slowMa[i];
           for (let gi = 0; gi < signalGrid.length; gi++) {

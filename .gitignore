@@ -35,6 +35,7 @@ yarn-error.log*
 *.csv.zst
 GLBX-*/
 results/
+.cache/
 
 # OS / editor
 .DS_Store

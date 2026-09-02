@@ -186,10 +186,11 @@ select {
   grid-area: side;
   display: flex;
   flex-direction: column;
+  gap: 12px;
   border-right: 1px solid var(--line);
   background: var(--panel-2);
   overflow: auto;
-  padding: 16px 14px 16px;
+  padding: 12px 12px 16px;
 }
 
 .sidebar-toggle {
@@ -214,7 +215,6 @@ select {
 .sidebar-tabs {
   display: flex;
   gap: 4px;
-  margin-bottom: 14px;
   width: 100%;
 }
 
@@ -317,6 +317,75 @@ select {
   text-transform: uppercase;
 }
 
+.sidebar .indicator label.threshold-field,
+.sidebar label.threshold-field {
+  grid-template-columns: 72px 1fr 64px;
+}
+
+.indicator-sub-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 12px 0 8px;
+}
+
+.indicator-sub-row .indicator-sub {
+  margin: 0;
+}
+
+.param-meta {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.config-lede {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.config-rules {
+  margin: 2px 0 14px;
+  display: grid;
+  gap: 8px;
+}
+
+.config-rules > div {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  gap: 8px;
+  align-items: start;
+}
+
+.config-rules dt {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding-top: 1px;
+}
+
+.config-rules dt.long {
+  color: var(--buy);
+}
+
+.config-rules dt.short {
+  color: var(--sell);
+}
+
+.config-rules dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .apply-config {
   display: block;
   width: 100%;
@@ -333,6 +402,15 @@ select {
 
 .gma-optimizer .optimizer-feature {
   margin-bottom: 10px;
+}
+
+.gma-optimizer .config-lede {
+  margin-bottom: 10px;
+}
+
+.gma-optimizer .config-rules {
+  margin-top: 0;
+  margin-bottom: 12px;
 }
 
 .optimizer-indicators {
@@ -503,10 +581,12 @@ label.optimizer-toggle.compact.macd input[type="checkbox"] {
   min-width: 0;
 }
 
-.sidebar section + section {
-  margin-top: 22px;
-  padding-top: 18px;
-  border-top: 1px solid var(--line);
+.sidebar section {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 12px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
 }
 
 .sidebar h2 {
@@ -540,7 +620,7 @@ label.optimizer-toggle.compact.macd input[type="checkbox"] {
   min-width: 0;
 }
 
-.sidebar label:not(.field) {
+.sidebar label:not(.field):not(.indicator-toggle) {
   display: grid;
   grid-template-columns: 52px 1fr 64px;
   gap: 8px;

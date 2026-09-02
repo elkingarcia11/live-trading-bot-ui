@@ -73,6 +73,7 @@ export interface GmaParams {
   slowSigma: number;
 }
 
+/** Optimization grid bounds. Manual indicator config is not limited to these. */
 export const GMA_LENGTH_MIN = 1;
 export const GMA_LENGTH_MAX = 100;
 export const GMA_SIGMA_MIN = 1;
@@ -82,16 +83,30 @@ export function gmaScale(length: number, sigma: number): number {
   return length / sigma;
 }
 
-export function isValidGmaPair(params: GmaParams): boolean {
+/** True when lengths/sigmas can be computed (any custom config). */
+export function isUsableGmaParams(params: GmaParams): boolean {
   return (
-    gmaScale(params.fastLength, params.fastSigma) <
-    gmaScale(params.slowLength, params.slowSigma)
+    Number.isFinite(params.fastLength) &&
+    params.fastLength >= 1 &&
+    Number.isFinite(params.slowLength) &&
+    params.slowLength >= 1 &&
+    Number.isFinite(params.fastSigma) &&
+    params.fastSigma > 0 &&
+    Number.isFinite(params.slowSigma) &&
+    params.slowSigma > 0
   );
 }
 
-/** Clamp GMA params to the range the backend `/api/chart` accepts
- *  (length 5–100, sigma 1–10) so applying optimizer results can never
- *  trigger a 422 validation error. */
+/** Optimization pair rules: fast L < slow L and fast L/σ < slow L/σ. */
+export function isValidGmaPair(params: GmaParams): boolean {
+  return (
+    params.fastLength < params.slowLength &&
+    gmaScale(params.fastLength, params.fastSigma) <
+      gmaScale(params.slowLength, params.slowSigma)
+  );
+}
+
+/** Clamp GMA params to the optimization grid when applying optimizer results. */
 export function clampGmaParams(params: GmaParams): GmaParams {
   return {
     fastLength: Math.min(GMA_LENGTH_MAX, Math.max(GMA_LENGTH_MIN, params.fastLength)),
@@ -106,6 +121,7 @@ export interface EmaParams {
   slow: number;
 }
 
+/** Optimization grid bounds. Manual EMA config is not limited to these. */
 export const EMA_LENGTH_MIN = 1;
 export const EMA_LENGTH_MAX = 100;
 
@@ -114,6 +130,12 @@ export const DEFAULT_EMA_PARAMS: EmaParams = {
   slow: 26,
 };
 
+/** True when both periods can be computed (any custom config). */
+export function isUsableEmaParams(params: EmaParams): boolean {
+  return Number.isFinite(params.fast) && params.fast >= 1 && Number.isFinite(params.slow) && params.slow >= 1;
+}
+
+/** Optimization pair rules: lengths 1–100 and fast < slow. */
 export function isValidEmaPair(params: EmaParams): boolean {
   return (
     params.fast >= EMA_LENGTH_MIN &&
@@ -131,6 +153,39 @@ export function clampEmaParams(params: EmaParams): EmaParams {
     fast: clampLen(params.fast),
     slow: clampLen(params.slow),
   };
+}
+
+/** Fast must be this many points beyond slow to take a GMA/EMA trade. */
+export const MA_SPREAD_MIN = 0.75;
+/** Close must be this many points beyond the relevant MA to take a GMA/EMA trade. */
+export const MA_CLOSE_MIN = 1.5;
+export const MA_THRESHOLD_STEP = 0.25;
+export const MA_THRESHOLD_MIN = 0.25;
+export const MA_THRESHOLD_MAX = 5;
+
+export interface DualMaThresholds {
+  maSpread: number;
+  closeMin: number;
+}
+
+export const DEFAULT_DUAL_MA_THRESHOLDS: DualMaThresholds = {
+  maSpread: MA_SPREAD_MIN,
+  closeMin: MA_CLOSE_MIN,
+};
+
+export function normalizeDualMaThresholds(
+  value?: Partial<DualMaThresholds> | null,
+): DualMaThresholds {
+  const maSpread = Number(value?.maSpread);
+  const closeMin = Number(value?.closeMin);
+  return {
+    maSpread: Number.isFinite(maSpread) && maSpread >= 0 ? maSpread : MA_SPREAD_MIN,
+    closeMin: Number.isFinite(closeMin) && closeMin >= 0 ? closeMin : MA_CLOSE_MIN,
+  };
+}
+
+export interface DualMaOptimizeOptions extends DualMaThresholds {
+  optimizeThresholds: boolean;
 }
 
 export interface MacdParams {
@@ -176,6 +231,7 @@ export interface GmaMacdParams {
   signalSigma: number;
 }
 
+/** Optimization grid bounds. Manual GMA MACD config is not limited to these. */
 export const GMA_MACD_LENGTH_MIN = 1;
 export const GMA_MACD_LENGTH_MAX = 100;
 export const GMA_MACD_SIGMA_MIN = 1;
@@ -192,6 +248,25 @@ export const DEFAULT_GMA_MACD_PARAMS: GmaMacdParams = {
   signalSigma: 3,
 };
 
+/** True when lengths/sigmas can be computed (any custom config). */
+export function isUsableGmaMacdParams(params: GmaMacdParams): boolean {
+  return (
+    Number.isFinite(params.fastLength) &&
+    params.fastLength >= 1 &&
+    Number.isFinite(params.slowLength) &&
+    params.slowLength >= 1 &&
+    Number.isFinite(params.signalLength) &&
+    params.signalLength >= 1 &&
+    Number.isFinite(params.fastSigma) &&
+    params.fastSigma > 0 &&
+    Number.isFinite(params.slowSigma) &&
+    params.slowSigma > 0 &&
+    Number.isFinite(params.signalSigma) &&
+    params.signalSigma > 0
+  );
+}
+
+/** Optimization scale rule: L/σ ≤ 3. */
 export function isValidGmaMacdScale(length: number, sigma: number): boolean {
   return (
     length >= GMA_MACD_LENGTH_MIN &&
@@ -208,25 +283,32 @@ export function gmaMacdSlowScale(params: GmaMacdParams): number {
   return params.slowLength / params.slowSigma;
 }
 
+/** Optimization pair rules: fast L < slow L and fast L/σ < slow L/σ. */
 export function isValidGmaMacdPair(params: GmaMacdParams): boolean {
-  return gmaMacdFastScale(params) < gmaMacdSlowScale(params);
+  return (
+    params.fastLength < params.slowLength &&
+    gmaMacdFastScale(params) < gmaMacdSlowScale(params)
+  );
 }
 
+/** Full optimization-grid validity (pair, scale, and search bounds). */
 export function isValidGmaMacdConfig(params: GmaMacdParams): boolean {
   return (
     params.fastLength <= GMA_MACD_LENGTH_MAX &&
     params.slowLength <= GMA_MACD_LENGTH_MAX &&
     params.fastSigma <= GMA_MACD_SIGMA_MAX &&
     params.slowSigma <= GMA_MACD_SIGMA_MAX &&
+    params.signalLength >= GMA_MACD_LENGTH_MIN &&
     params.signalLength <= GMA_MACD_SIGNAL_LENGTH_MAX &&
+    params.signalSigma >= GMA_MACD_SIGMA_MIN &&
     params.signalSigma <= GMA_MACD_SIGMA_MAX &&
     isValidGmaMacdScale(params.fastLength, params.fastSigma) &&
     isValidGmaMacdScale(params.slowLength, params.slowSigma) &&
-    isValidGmaMacdScale(params.signalLength, params.signalSigma) &&
     isValidGmaMacdPair(params)
   );
 }
 
+/** Clamp GMA MACD params to the optimization grid when applying optimizer results. */
 export function clampGmaMacdParams(params: GmaMacdParams): GmaMacdParams {
   const clampLen = (value: number, max: number) =>
     Math.min(max, Math.max(GMA_MACD_LENGTH_MIN, Math.round(value) || GMA_MACD_LENGTH_MIN));
@@ -345,9 +427,9 @@ export interface LoadProgress {
 }
 
 export const DEFAULT_PARAMS: GmaParams = {
-  fastLength: 30,
+  fastLength: 19,
   fastSigma: 7,
-  slowLength: 19,
+  slowLength: 30,
   slowSigma: 4,
 };
 
@@ -454,6 +536,8 @@ export interface OptimizeResult {
     fast_sigma: number;
     slow_length: number;
     slow_sigma: number;
+    ma_spread?: number;
+    close_min?: number;
   };
   macd_params?: { fast: number; slow: number; signal: number } | null;
   win_rate: number;

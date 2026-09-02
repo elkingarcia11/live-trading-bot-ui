@@ -1,4 +1,6 @@
-import type { Action, Bar } from "./types";
+import { MA_CLOSE_MIN, MA_SPREAD_MIN, type Action, type Bar } from "./types";
+
+export { MA_CLOSE_MIN, MA_SPREAD_MIN };
 
 export type PositionSide = "long" | "short";
 
@@ -20,9 +22,15 @@ function etClock(unix: number): { date: string; minutes: number } {
   const parts = ET_FMT.formatToParts(new Date(unix * 1000));
   const get = (type: Intl.DateTimeFormatPartTypes) =>
     parts.find((part) => part.type === type)?.value ?? "0";
+  let hour = Number(get("hour"));
+  const minute = Number(get("minute"));
+  const period = (parts.find((part) => part.type === "dayPeriod")?.value ?? "").toLowerCase();
+  if (period.startsWith("p") && hour < 12) hour += 12;
+  if (period.startsWith("a") && hour === 12) hour = 0;
+  if (hour === 24) hour = 0;
   return {
     date: `${get("year")}-${get("month")}-${get("day")}`,
-    minutes: Number(get("hour")) * 60 + Number(get("minute")),
+    minutes: hour * 60 + minute,
   };
 }
 
@@ -125,61 +133,98 @@ export interface SignalConfig {
   emaFast?: Array<number | null>;
   emaSlow?: Array<number | null>;
   gmaMacdHist?: Array<number | null>;
+  maSpreadMin?: number;
+  maCloseMin?: number;
+  /** When false, GMA/EMA use fast/slow crossovers only (no close or MA-distance signals). */
+  useMaThresholds?: boolean;
 }
 
-/** Close must be this many points above slow to take a GMA/EMA long on a bullish cross. */
-export const MA_LONG_ABOVE_SLOW = 1.5;
-/** Close must be this many points below fast to take a GMA/EMA short on a bearish cross. */
-export const MA_SHORT_BELOW_FAST = 1.5;
-/** Close this many points beyond slow opens GMA/EMA in that direction without a cross. */
-export const MA_EXTREME_VS_SLOW = 3;
+export type DualMaReason = "ma" | "close";
 
-function dualMaCross(
+export interface DualMaZones {
+  maLong: boolean;
+  maShort: boolean;
+  closeLong: boolean;
+  closeShort: boolean;
+}
+
+export function dualMaZones(
   fast: number | null | undefined,
   slow: number | null | undefined,
-  prevFast: number | null | undefined,
-  prevSlow: number | null | undefined,
-  sessionOpen: boolean,
-  flat: boolean,
-  backendSignal?: Bar["signal"],
-): { crossBuy: boolean; crossSell: boolean } {
-  const maLong = fast != null && slow != null && fast > slow;
-  const maShort = fast != null && slow != null && fast < slow;
-  const maLongPrev = prevFast != null && prevSlow != null && prevFast > prevSlow;
-  const maShortPrev = prevFast != null && prevSlow != null && prevFast < prevSlow;
-  if (backendSignal === "buy") return { crossBuy: true, crossSell: false };
-  if (backendSignal === "sell") return { crossBuy: false, crossSell: true };
-  if (sessionOpen && flat && fast != null && slow != null) {
-    return { crossBuy: maLong, crossSell: maShort };
-  }
-  if (!sessionOpen) {
-    return { crossBuy: maLong && !maLongPrev, crossSell: maShort && !maShortPrev };
-  }
-  return { crossBuy: false, crossSell: false };
-}
-
-function dualMaExtreme(
   close: number,
-  slow: number | null | undefined,
-  prevClose: number | null | undefined,
-  prevSlow: number | null | undefined,
-  sessionOpen: boolean,
-): { extremeLong: boolean; extremeShort: boolean } {
-  if (slow == null || !Number.isFinite(close)) {
-    return { extremeLong: false, extremeShort: false };
-  }
-  const above = close >= slow + MA_EXTREME_VS_SLOW;
-  const below = close <= slow - MA_EXTREME_VS_SLOW;
-  if (sessionOpen) return { extremeLong: above, extremeShort: below };
-  const prevAbove =
-    prevSlow != null && prevClose != null && prevClose >= prevSlow + MA_EXTREME_VS_SLOW;
-  const prevBelow =
-    prevSlow != null && prevClose != null && prevClose <= prevSlow - MA_EXTREME_VS_SLOW;
-  return { extremeLong: above && !prevAbove, extremeShort: below && !prevBelow };
+  maSpreadMin = MA_SPREAD_MIN,
+  maCloseMin = MA_CLOSE_MIN,
+): DualMaZones {
+  const haveMa = fast != null && slow != null;
+  return {
+    maLong: Boolean(haveMa && fast >= slow + maSpreadMin),
+    maShort: Boolean(haveMa && fast <= slow - maSpreadMin),
+    closeLong: Boolean(slow != null && close >= slow + maCloseMin),
+    closeShort: Boolean(
+      (fast != null && close <= fast - maCloseMin) ||
+        (slow != null && close <= slow - maCloseMin),
+    ),
+  };
 }
 
-/** GMA/EMA entries: filtered crossovers plus 3-point close-vs-slow displacements. */
-function dualMaSignals(args: {
+function dualMaEdge(current: boolean, previous: boolean, sessionOpen: boolean): boolean {
+  return sessionOpen ? current : current && !previous;
+}
+
+function dualMaEntryReasons(
+  zones: DualMaZones,
+  prev: DualMaZones | null,
+  sessionOpen: boolean,
+  backendSignal?: Bar["signal"],
+): { buy: DualMaReason[]; sell: DualMaReason[] } {
+  const prevMaLong = prev?.maLong ?? false;
+  const prevMaShort = prev?.maShort ?? false;
+  const prevCloseLong = prev?.closeLong ?? false;
+  const prevCloseShort = prev?.closeShort ?? false;
+  let enterMaLong =
+    backendSignal === "buy" || dualMaEdge(zones.maLong, prevMaLong, sessionOpen);
+  let enterMaShort =
+    backendSignal === "sell" || dualMaEdge(zones.maShort, prevMaShort, sessionOpen);
+  let enterCloseLong = dualMaEdge(zones.closeLong, prevCloseLong, sessionOpen);
+  let enterCloseShort = dualMaEdge(zones.closeShort, prevCloseShort, sessionOpen);
+  if (enterMaLong && !zones.maLong) enterMaLong = false;
+  if (enterMaShort && !zones.maShort) enterMaShort = false;
+  if (enterCloseLong && !zones.closeLong) enterCloseLong = false;
+  if (enterCloseShort && !zones.closeShort) enterCloseShort = false;
+
+  const buy: DualMaReason[] = [];
+  const sell: DualMaReason[] = [];
+  if (enterMaLong) buy.push("ma");
+  if (enterCloseLong) buy.push("close");
+  if (enterMaShort) sell.push("ma");
+  if (enterCloseShort) sell.push("close");
+  if (buy.length && sell.length) {
+    const buyClose = buy.includes("close");
+    const sellClose = sell.includes("close");
+    if (buyClose && !sellClose) sell.length = 0;
+    else if (sellClose && !buyClose) buy.length = 0;
+    else {
+      buy.length = 0;
+      sell.length = 0;
+    }
+  }
+  return { buy, sell };
+}
+
+function dualMaReasonsAfterFlip(
+  side: PositionSide,
+  reasons: DualMaReason[],
+  zones: DualMaZones,
+): DualMaReason[] {
+  return reasons.filter((reason) => {
+    if (reason === "ma") return side === "long" ? !zones.maShort : !zones.maLong;
+    return side === "long" ? !zones.closeShort : !zones.closeLong;
+  });
+}
+
+function applyDualMaBar(args: {
+  side: PositionSide | null;
+  reasons: DualMaReason[];
   close: number;
   prevClose: number | null | undefined;
   fast: number | null | undefined;
@@ -187,38 +232,118 @@ function dualMaSignals(args: {
   prevFast: number | null | undefined;
   prevSlow: number | null | undefined;
   sessionOpen: boolean;
-  flat: boolean;
   backendSignal?: Bar["signal"];
-}): { crossBuy: boolean; crossSell: boolean; buy: boolean; sell: boolean } {
-  const { crossBuy, crossSell } = dualMaCross(
-    args.fast,
-    args.slow,
-    args.prevFast,
-    args.prevSlow,
-    args.sessionOpen,
-    args.flat,
-    args.backendSignal,
-  );
-  const { extremeLong, extremeShort } = dualMaExtreme(
-    args.close,
-    args.slow,
-    args.prevClose,
-    args.prevSlow,
-    args.sessionOpen,
-  );
-  const longOk = args.slow != null && args.close >= args.slow + MA_LONG_ABOVE_SLOW;
-  const shortOk = args.fast != null && args.close <= args.fast - MA_SHORT_BELOW_FAST;
-  let buy = extremeLong || (crossBuy && longOk);
-  let sell = extremeShort || (crossSell && shortOk);
-  if (extremeLong) sell = false;
-  if (extremeShort) buy = false;
-  return { crossBuy, crossSell, buy, sell };
+  maSpreadMin?: number;
+  maCloseMin?: number;
+}): {
+  side: PositionSide | null;
+  reasons: DualMaReason[];
+  closeLongPos: boolean;
+  closeShortPos: boolean;
+  openLong: boolean;
+  openShort: boolean;
+} {
+  const maSpreadMin = args.maSpreadMin ?? MA_SPREAD_MIN;
+  const maCloseMin = args.maCloseMin ?? MA_CLOSE_MIN;
+  const zones = dualMaZones(args.fast, args.slow, args.close, maSpreadMin, maCloseMin);
+  const prevZones =
+    args.prevClose != null && Number.isFinite(args.prevClose)
+      ? dualMaZones(args.prevFast, args.prevSlow, args.prevClose, maSpreadMin, maCloseMin)
+      : null;
+  let { side, reasons } = args;
+  let closeLongPos = false;
+  let closeShortPos = false;
+  if (side != null) {
+    reasons = dualMaReasonsAfterFlip(side, reasons, zones);
+    if (reasons.length === 0) {
+      if (side === "long") closeLongPos = true;
+      else closeShortPos = true;
+      side = null;
+    }
+  }
+  let openLong = false;
+  let openShort = false;
+  if (side == null) {
+    const entry = dualMaEntryReasons(zones, prevZones, args.sessionOpen, args.backendSignal);
+    if (entry.buy.length) {
+      openLong = true;
+      side = "long";
+      reasons = entry.buy;
+    } else if (entry.sell.length) {
+      openShort = true;
+      side = "short";
+      reasons = entry.sell;
+    } else {
+      reasons = [];
+    }
+  }
+  return { side, reasons, closeLongPos, closeShortPos, openLong, openShort };
+}
+
+function applyMaCrossoverBar(args: {
+  side: PositionSide | null;
+  fast: number | null | undefined;
+  slow: number | null | undefined;
+  prevFast: number | null | undefined;
+  prevSlow: number | null | undefined;
+  sessionOpen: boolean;
+  backendSignal?: Bar["signal"];
+}): {
+  side: PositionSide | null;
+  closeLongPos: boolean;
+  closeShortPos: boolean;
+  openLong: boolean;
+  openShort: boolean;
+} {
+  const maLong = args.fast != null && args.slow != null && args.fast > args.slow;
+  const maShort = args.fast != null && args.slow != null && args.fast < args.slow;
+  const prevLong =
+    args.prevFast != null && args.prevSlow != null && args.prevFast > args.prevSlow;
+  const prevShort =
+    args.prevFast != null && args.prevSlow != null && args.prevFast < args.prevSlow;
+  let buy = false;
+  let sell = false;
+  if (args.backendSignal === "buy") buy = true;
+  else if (args.backendSignal === "sell") sell = true;
+  else if (args.sessionOpen && args.side == null) {
+    buy = maLong;
+    sell = maShort;
+  } else {
+    buy = maLong && !prevLong;
+    sell = maShort && !prevShort;
+  }
+  let { side } = args;
+  let closeLongPos = false;
+  let closeShortPos = false;
+  let openLong = false;
+  let openShort = false;
+  if (buy) {
+    if (side === "short") {
+      closeShortPos = true;
+      side = null;
+    }
+    if (side == null) {
+      openLong = true;
+      side = "long";
+    }
+  } else if (sell) {
+    if (side === "long") {
+      closeLongPos = true;
+      side = null;
+    }
+    if (side == null) {
+      openShort = true;
+      side = "short";
+    }
+  }
+  return { side, closeLongPos, closeShortPos, openLong, openShort };
 }
 
 /** Map indicator signals onto open/close call/put actions during RTH only.
- *  GMA/EMA: bullish cross opens long only if close is 1.5+ above slow; bearish
- *  cross opens short only if close is 1.5+ below fast. Close 3+ above/below
- *  slow also opens long/short. Opposite MA cross still exits.
+ *  GMA/EMA with thresholds: long if fast is maSpreadMin+ above slow or close is maCloseMin+
+ *  above slow; short if fast is maSpreadMin+ below slow or close is maCloseMin+ below fast
+ *  or slow. Exit only when every reason that opened the trade flips to the opposite side.
+ *  GMA/EMA without thresholds: fast/slow crossovers; exit on the opposite crossover.
  *  MACD only: MACD line crosses above/below zero.
  *  GMA MACD: histogram crosses above/below zero (hist > 0 long, hist < 0 short). */
 export function withActions(bars: Bar[], config?: SignalConfig): Bar[] {
@@ -230,6 +355,9 @@ export function withActions(bars: Bar[], config?: SignalConfig): Bar[] {
   const emaFast = config?.emaFast;
   const emaSlow = config?.emaSlow;
   const gmaMacdHist = config?.gmaMacdHist;
+  const maSpreadMin = config?.maSpreadMin ?? MA_SPREAD_MIN;
+  const maCloseMin = config?.maCloseMin ?? MA_CLOSE_MIN;
+  const useMaThresholds = config?.useMaThresholds ?? true;
 
   if (!useGma && !useMacd && !useEma && !useGmaMacd) {
     return bars.map((bar) => ({ ...bar }));
@@ -237,6 +365,7 @@ export function withActions(bars: Bar[], config?: SignalConfig): Bar[] {
 
   const flags = sessionFlags(bars);
   let side: PositionSide | null = null;
+  let dualReasons: DualMaReason[] = [];
   return bars.map((bar, i) => {
     const actions: Action[] = [];
     const canTrade = flags.rth[i] && !flags.close[i];
@@ -294,31 +423,43 @@ export function withActions(bars: Bar[], config?: SignalConfig): Bar[] {
           side = "short";
         }
       } else if (useGma) {
-        const gma = dualMaSignals({
-          close: bar.close,
-          prevClose: prev?.close,
-          fast: bar.gma_fast,
-          slow: bar.gma_slow,
-          prevFast: prev?.gma_fast,
-          prevSlow: prev?.gma_slow,
-          sessionOpen: flags.open[i],
-          flat: side == null,
-          backendSignal: bar.signal,
-        });
-        if (side === "short" && (gma.crossBuy || gma.buy)) {
-          actions.push("close_put");
-          side = null;
-        }
-        if (side === "long" && (gma.crossSell || gma.sell)) {
-          actions.push("close_call");
-          side = null;
-        }
-        if (side == null && gma.buy) {
-          actions.push("open_call");
-          side = "long";
-        } else if (side == null && gma.sell) {
-          actions.push("open_put");
-          side = "short";
+        if (useMaThresholds) {
+          const gma = applyDualMaBar({
+            side,
+            reasons: dualReasons,
+            close: bar.close,
+            prevClose: prev?.close,
+            fast: bar.gma_fast,
+            slow: bar.gma_slow,
+            prevFast: prev?.gma_fast,
+            prevSlow: prev?.gma_slow,
+            sessionOpen: flags.open[i],
+            backendSignal: bar.signal,
+            maSpreadMin,
+            maCloseMin,
+          });
+          if (gma.closeShortPos) actions.push("close_put");
+          if (gma.closeLongPos) actions.push("close_call");
+          if (gma.openLong) actions.push("open_call");
+          else if (gma.openShort) actions.push("open_put");
+          side = gma.side;
+          dualReasons = gma.reasons;
+        } else {
+          const gma = applyMaCrossoverBar({
+            side,
+            fast: bar.gma_fast,
+            slow: bar.gma_slow,
+            prevFast: prev?.gma_fast,
+            prevSlow: prev?.gma_slow,
+            sessionOpen: flags.open[i],
+            backendSignal: bar.signal,
+          });
+          if (gma.closeShortPos) actions.push("close_put");
+          if (gma.closeLongPos) actions.push("close_call");
+          if (gma.openLong) actions.push("open_call");
+          else if (gma.openShort) actions.push("open_put");
+          side = gma.side;
+          dualReasons = [];
         }
       } else if (useMacd) {
         let buy = false;
@@ -385,37 +526,49 @@ export function withActions(bars: Bar[], config?: SignalConfig): Bar[] {
           }
         }
       } else if (useEma) {
-        const ema = dualMaSignals({
-          close: bar.close,
-          prevClose: prev?.close,
-          fast: emaFast?.[i] ?? null,
-          slow: emaSlow?.[i] ?? null,
-          prevFast: i > 0 && emaFast ? emaFast[i - 1] : null,
-          prevSlow: i > 0 && emaSlow ? emaSlow[i - 1] : null,
-          sessionOpen: flags.open[i],
-          flat: side == null,
-          backendSignal: null,
-        });
-        if (side === "short" && (ema.crossBuy || ema.buy)) {
-          actions.push("close_put");
-          side = null;
-        }
-        if (side === "long" && (ema.crossSell || ema.sell)) {
-          actions.push("close_call");
-          side = null;
-        }
-        if (side == null && ema.buy) {
-          actions.push("open_call");
-          side = "long";
-        } else if (side == null && ema.sell) {
-          actions.push("open_put");
-          side = "short";
+        if (useMaThresholds) {
+          const ema = applyDualMaBar({
+            side,
+            reasons: dualReasons,
+            close: bar.close,
+            prevClose: prev?.close,
+            fast: emaFast?.[i] ?? null,
+            slow: emaSlow?.[i] ?? null,
+            prevFast: i > 0 && emaFast ? emaFast[i - 1] : null,
+            prevSlow: i > 0 && emaSlow ? emaSlow[i - 1] : null,
+            sessionOpen: flags.open[i],
+            backendSignal: null,
+            maSpreadMin,
+            maCloseMin,
+          });
+          if (ema.closeShortPos) actions.push("close_put");
+          if (ema.closeLongPos) actions.push("close_call");
+          if (ema.openLong) actions.push("open_call");
+          else if (ema.openShort) actions.push("open_put");
+          side = ema.side;
+          dualReasons = ema.reasons;
+        } else {
+          const ema = applyMaCrossoverBar({
+            side,
+            fast: emaFast?.[i] ?? null,
+            slow: emaSlow?.[i] ?? null,
+            prevFast: i > 0 && emaFast ? emaFast[i - 1] : null,
+            prevSlow: i > 0 && emaSlow ? emaSlow[i - 1] : null,
+            sessionOpen: flags.open[i],
+          });
+          if (ema.closeShortPos) actions.push("close_put");
+          if (ema.closeLongPos) actions.push("close_call");
+          if (ema.openLong) actions.push("open_call");
+          else if (ema.openShort) actions.push("open_put");
+          side = ema.side;
+          dualReasons = [];
         }
       }
     }
     if (flags.close[i] && side != null) {
       actions.push(side === "long" ? "close_call" : "close_put");
       side = null;
+      dualReasons = [];
     }
     return { ...bar, actions };
   });

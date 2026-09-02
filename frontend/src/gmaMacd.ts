@@ -7,7 +7,7 @@ import type { GmaMacdParams } from "./types";
 function traditionalGma(source: Array<number | null>, length: number, sigma: number): Array<number | null> {
   const n = source.length;
   const out: Array<number | null> = Array(n).fill(null);
-  if (length < 1 || sigma < 1 || n < length) return out;
+  if (length < 1 || sigma <= 0 || n < length) return out;
 
   const weights = new Float64Array(length);
   let weightSum = 0;

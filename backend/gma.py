@@ -39,8 +39,8 @@ def ema(source: np.ndarray, period: int = SOURCE_PERIOD) -> np.ndarray:
 
 
 def gaussian_weights(length: int, sigma_div: float) -> np.ndarray:
-    if length < 2:
-        raise ValueError("length must be >= 2")
+    if length < 1:
+        raise ValueError("length must be >= 1")
     if sigma_div <= 0:
         raise ValueError("sigma_div must be > 0")
     i = np.arange(length, dtype=np.float64)

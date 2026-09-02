@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -14,7 +16,13 @@ from pathlib import Path
 from threading import Lock
 from typing import Callable
 
-from backend.aggregate import aggregate_ohlcv, aggregate_trades, attach_source_mas, parse_spec
+from backend.aggregate import (
+    aggregate_ohlcv,
+    aggregate_trades,
+    attach_source_mas,
+    clip_rth_ohlcv,
+    parse_spec,
+)
 import pandas as pd
 import pyarrow.parquet as pq
 from google.api_core.exceptions import NotFound
@@ -27,6 +35,8 @@ OHLCV_PREFIX = "ohlcv/"
 TRADES_PREFIX = "trades/"
 CONTINUOUS_PREFIX = "continuous_data/"
 _LOCAL_KEY = Path(__file__).resolve().parent.parent / "gcs-sa.json"
+_DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache" / "gcs"
+_cache_write_lock = Lock()
 
 
 @lru_cache(maxsize=1)
@@ -273,12 +283,12 @@ def _load_continuous_objects(
     if on_file is not None:
         on_file(0, 1, obj.name)
     total = max(int(obj.size or 0), 0)
-    raw = _chunked_download(
-        bucket.blob(obj.name),
+    raw = _read_blob(
+        bucket,
+        obj,
         on_delta=(lambda done: on_bytes(done, total, obj.name))
         if on_bytes is not None
         else None,
-        refresh_blob=lambda: bucket.blob(obj.name),
     )
     frame = pd.read_csv(io.BytesIO(raw))
     frame = _normalize_continuous_csv(frame, obj.name)
@@ -315,12 +325,12 @@ def load_continuous_base(
     if on_file is not None:
         on_file(0, 1, obj.name)
     total = max(int(obj.size or 0), 0)
-    raw = _chunked_download(
-        bucket.blob(obj.name),
+    raw = _read_blob(
+        bucket,
+        obj,
         on_delta=(lambda done: on_bytes(done, total, obj.name))
         if on_bytes is not None
         else None,
-        refresh_blob=lambda: bucket.blob(obj.name),
     )
     frame = pd.read_csv(io.BytesIO(raw))
     frame = _normalize_continuous_source(frame, obj.name)
@@ -411,6 +421,9 @@ class ProgressClock:
 
 
 _DOWNLOAD_CHUNK = 1 << 20  # 1 MiB
+_RANGE_CHUNK = 16 << 20  # 16 MiB; range GETs are RTT-heavy at 1 MiB
+_CACHE_PREFIX = 64 << 10  # 64 KiB; used to detect CSV appends vs rewrites
+_CACHE_META_VERSION = 1
 
 
 def _fmt_bytes(n: int | float) -> str:
@@ -420,6 +433,293 @@ def _fmt_bytes(n: int | float) -> str:
             return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
         value /= 1024
     return f"{value:.1f} TB"
+
+
+def _cache_root() -> Path | None:
+    """Directory for GCS blob cache, or None to skip disk cache.
+
+    Override with GCS_CACHE_DIR. Set it to an empty string to disable.
+    """
+    raw = os.environ.get("GCS_CACHE_DIR")
+    if raw is not None and raw.strip() == "":
+        return None
+    return Path(raw) if raw else _DEFAULT_CACHE_DIR
+
+
+def _safe_blob_relpath(name: str) -> Path:
+    parts = [part for part in name.split("/") if part and part not in (".", "..")]
+    if not parts:
+        raise ValueError(f"invalid blob name: {name}")
+    return Path(*parts)
+
+
+def _cache_data_path(name: str) -> Path | None:
+    root = _cache_root()
+    if root is None:
+        return None
+    return root / _safe_blob_relpath(name)
+
+
+def _cache_meta_path(name: str) -> Path | None:
+    data = _cache_data_path(name)
+    if data is None:
+        return None
+    return data.with_name(data.name + ".meta.json")
+
+
+def _read_cache_meta(name: str) -> dict | None:
+    path = _cache_meta_path(name)
+    if path is None or not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    generation = str(payload.get("generation") or "")
+    try:
+        size = int(payload.get("size") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not generation or size <= 0:
+        return None
+    return {"generation": generation, "size": size}
+
+
+def _write_cache_meta(name: str, generation: str, size: int) -> None:
+    path = _cache_meta_path(name)
+    if path is None or not generation:
+        return
+    payload = json.dumps(
+        {
+            "version": _CACHE_META_VERSION,
+            "generation": generation,
+            "size": int(size),
+        },
+        separators=(",", ":"),
+    )
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f"{path.name}.", suffix=".tmp", dir=path.parent
+        )
+    except OSError:
+        return
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        tmp_path.replace(path)
+    except OSError:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _read_path_chunked(
+    path: Path,
+    on_delta: Callable[[int], None] | None = None,
+) -> bytes | None:
+    buffer = bytearray()
+    try:
+        with path.open("rb") as reader:
+            while True:
+                chunk = reader.read(_DOWNLOAD_CHUNK)
+                if not chunk:
+                    return bytes(buffer)
+                buffer += chunk
+                if on_delta is not None:
+                    on_delta(len(buffer))
+    except OSError:
+        return None
+
+
+def _prune_legacy_cache(name: str) -> None:
+    """Remove generation-suffixed files left by the previous cache layout."""
+    path = _cache_data_path(name)
+    meta = _cache_meta_path(name)
+    if path is None or not path.parent.is_dir():
+        return
+    prefix = path.name + "."
+    for item in path.parent.iterdir():
+        if not item.is_file() or item == path or item == meta:
+            continue
+        if item.name.startswith(prefix) and not item.name.endswith(".tmp"):
+            try:
+                item.unlink()
+            except OSError:
+                pass
+
+
+def _cache_write(name: str, generation: str, data: bytes) -> None:
+    path = _cache_data_path(name)
+    if path is None or not generation:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f"{path.name}.", suffix=".tmp", dir=path.parent
+        )
+    except OSError:
+        return
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        tmp_path.replace(path)
+        _write_cache_meta(name, generation, len(data))
+        _prune_legacy_cache(name)
+    except OSError:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _cache_append(name: str, generation: str, tail: bytes) -> bytes | None:
+    """Append ``tail`` to the cached blob and return the full bytes, or None."""
+    path = _cache_data_path(name)
+    if path is None or not path.is_file() or not generation:
+        return None
+    try:
+        head = path.read_bytes()
+        with path.open("ab") as handle:
+            handle.write(tail)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _write_cache_meta(name, generation, len(head) + len(tail))
+        _prune_legacy_cache(name)
+        return head + tail
+    except OSError:
+        return None
+
+
+def _generation_blob(bucket: storage.Bucket, obj: ObjectMeta) -> storage.Blob:
+    if obj.generation.isdigit():
+        return bucket.blob(obj.name, generation=int(obj.generation))
+    return bucket.blob(obj.name)
+
+
+def _download_range(
+    blob: storage.Blob,
+    start: int,
+    end_exclusive: int,
+    on_delta: Callable[[int], None] | None = None,
+    chunk_size: int = _RANGE_CHUNK,
+) -> bytes:
+    """Download ``[start, end_exclusive)`` from ``blob``, reporting range bytes."""
+    if end_exclusive <= start:
+        return b""
+    buffer = bytearray()
+    cursor = start
+    while cursor < end_exclusive:
+        chunk_end = min(cursor + chunk_size, end_exclusive) - 1
+        chunk = blob.download_as_bytes(start=cursor, end=chunk_end)
+        if not chunk:
+            break
+        buffer += chunk
+        cursor += len(chunk)
+        if on_delta is not None:
+            on_delta(len(buffer))
+    return bytes(buffer)
+
+
+def _csv_append_tail(
+    bucket: storage.Bucket,
+    obj: ObjectMeta,
+    cached_size: int,
+    on_delta: Callable[[int], None] | None = None,
+) -> bytes | None:
+    """If the new CSV generation is the cached file plus extra rows, return the tail."""
+    if not obj.name.lower().endswith(".csv"):
+        return None
+    total = int(obj.size or 0)
+    if cached_size <= 0 or total < cached_size:
+        return None
+    blob = _generation_blob(bucket, obj)
+    prefix_len = min(_CACHE_PREFIX, cached_size)
+    try:
+        remote_head = blob.download_as_bytes(start=0, end=prefix_len - 1)
+    except NotFound:
+        return None
+    path = _cache_data_path(obj.name)
+    if path is None or not path.is_file():
+        return None
+    try:
+        with path.open("rb") as reader:
+            local_head = reader.read(prefix_len)
+    except OSError:
+        return None
+    if remote_head != local_head:
+        return None
+    if total == cached_size:
+        return b""
+    if on_delta is not None:
+        on_delta(cached_size)
+    try:
+        tail = _download_range(
+            blob,
+            cached_size,
+            total,
+            on_delta=(lambda done: on_delta(cached_size + done))
+            if on_delta is not None
+            else None,
+        )
+    except NotFound:
+        return None
+    if len(tail) != total - cached_size:
+        return None
+    return tail
+
+
+def _read_blob(
+    bucket: storage.Bucket,
+    obj: ObjectMeta,
+    on_delta: Callable[[int], None] | None = None,
+) -> bytes:
+    path = _cache_data_path(obj.name)
+    meta = _read_cache_meta(obj.name)
+    expected = int(obj.size or 0)
+    if (
+        path is not None
+        and meta is not None
+        and meta["generation"] == obj.generation
+        and path.is_file()
+    ):
+        try:
+            disk_size = path.stat().st_size
+        except OSError:
+            disk_size = -1
+        if disk_size == meta["size"] and (expected <= 0 or disk_size == expected):
+            cached = _read_path_chunked(path, on_delta=on_delta)
+            if cached is not None:
+                return cached
+
+    if path is not None and meta is not None and path.is_file() and expected > 0:
+        try:
+            disk_size = path.stat().st_size
+        except OSError:
+            disk_size = -1
+        if disk_size == meta["size"]:
+            tail = _csv_append_tail(
+                bucket, obj, meta["size"], on_delta=on_delta
+            )
+            if tail is not None:
+                if not tail:
+                    _write_cache_meta(obj.name, obj.generation, meta["size"])
+                    cached = _read_path_chunked(path, on_delta=on_delta)
+                    if cached is not None:
+                        return cached
+                else:
+                    with _cache_write_lock:
+                        combined = _cache_append(obj.name, obj.generation, tail)
+                    if combined is not None:
+                        return combined
+
+    raw = _chunked_download(
+        bucket.blob(obj.name),
+        on_delta=on_delta,
+        refresh_blob=lambda: bucket.blob(obj.name),
+    )
+    with _cache_write_lock:
+        _cache_write(obj.name, obj.generation, raw)
+    return raw
 
 
 def _chunked_download(
@@ -455,14 +755,14 @@ def _chunked_download(
 
 
 def _download_parquet(
-    blob: storage.Blob,
+    bucket: storage.Bucket,
+    obj: ObjectMeta,
     on_delta: Callable[[int], None] | None = None,
-    refresh_blob: Callable[[], storage.Blob] | None = None,
 ) -> pd.DataFrame:
-    raw = _chunked_download(blob, on_delta=on_delta, refresh_blob=refresh_blob)
+    raw = _read_blob(bucket, obj, on_delta=on_delta)
     table = pq.read_table(io.BytesIO(raw))
     frame = table.to_pandas()
-    frame.attrs["gcs_name"] = blob.name
+    frame.attrs["gcs_name"] = obj.name
     return frame
 
 
@@ -536,8 +836,7 @@ def _concat_parquets(
         empty = pd.DataFrame()
         return empty, "", None
     bucket = _client().bucket(BUCKET_NAME)
-    blobs = [bucket.blob(item.name) for item in objects]
-    frames: list[pd.DataFrame | None] = [None] * len(blobs)
+    frames: list[pd.DataFrame | None] = [None] * len(objects)
     total_bytes = sum(max(int(item.size or 0), 0) for item in objects)
     progress_by_index = [0] * len(objects)
     lock = Lock()
@@ -555,21 +854,17 @@ def _concat_parquets(
                 overall = sum(progress_by_index)
             on_bytes(overall, total_bytes, meta.name)
 
-        frames[index] = _download_parquet(
-            blobs[index],
-            on_delta=on_delta,
-            refresh_blob=lambda: bucket.blob(meta.name),
-        )
+        frames[index] = _download_parquet(bucket, meta, on_delta=on_delta)
 
-    with ThreadPoolExecutor(max_workers=min(8, len(blobs))) as pool:
-        futures = {pool.submit(download, i): i for i in range(len(blobs))}
+    with ThreadPoolExecutor(max_workers=min(8, len(objects))) as pool:
+        futures = {pool.submit(download, i): i for i in range(len(objects))}
         finished = 0
         for fut in as_completed(futures):
             idx = futures[fut]
             fut.result()
             finished += 1
             if on_file is not None:
-                on_file(finished, len(blobs), objects[idx].name)
+                on_file(finished, len(objects), objects[idx].name)
     ready = [frame for frame in frames if frame is not None]
     if len(ready) != len(frames):
         raise RuntimeError("Failed to download one or more parquet files")
@@ -678,6 +973,23 @@ class OhlcvStore:
                 return self._ohlcv.get((symbol, timeframe))
             return self._ohlcv.get((symbol, timeframe)) or self._agg.get((symbol, timeframe))
 
+    @staticmethod
+    def _reuse_memory(
+        cached: CacheEntry | None,
+        refresh: bool,
+        symbol: str,
+        timeframe: str,
+        source: str,
+    ) -> CacheEntry | None:
+        if cached is None:
+            return None
+        if not refresh:
+            return cached
+        current = fingerprint(symbol, timeframe, source)
+        if current and current == cached.fingerprint:
+            return cached
+        return None
+
     def _get_continuous(
         self,
         symbol: str,
@@ -688,11 +1000,12 @@ class OhlcvStore:
         key = (symbol, timeframe)
         with self._lock:
             cached = self._continuous.get(key)
-        if not refresh and cached is not None:
+        hit = self._reuse_memory(cached, refresh, symbol, timeframe, "continuous")
+        if hit is not None:
             if progress is not None:
                 progress.emit(
-                    75, f"Using cached {timeframe} ({len(cached.frame):,} bars)", stage="cache")
-            return cached
+                    75, f"Using cached {timeframe} ({len(hit.frame):,} bars)", stage="cache")
+            return hit
         if progress is not None:
             progress.emit(
                 5, f"Reading continuous_data/{timeframe}", stage="lookup")
@@ -701,9 +1014,11 @@ class OhlcvStore:
             symbol, timeframe, on_file=on_file, on_bytes=on_bytes
         )
         if not frame.empty:
+            frame = clip_rth_ohlcv(frame)
+        if not frame.empty:
             if progress is not None:
                 progress.emit(
-                    78, f"Loaded {len(frame):,} {timeframe} bars", stage="prepare")
+                    78, f"Loaded {len(frame):,} {timeframe} RTH bars", stage="prepare")
             entry = CacheEntry(
                 frame=frame,
                 fingerprint=fp,
@@ -758,7 +1073,7 @@ class OhlcvStore:
             if progress is not None:
                 progress.emit(5, "Reading continuous_data/es.csv", stage="lookup")
             on_file, on_bytes = _download_callbacks(
-                progress, 8.0, 38.0, prefix="Downloading "
+                progress, 8.0, 38.0, prefix="Loading "
             )
             frame, fp, updated = load_continuous_base(
                 symbol, on_file=on_file, on_bytes=on_bytes
@@ -844,11 +1159,12 @@ class OhlcvStore:
         key = (symbol, timeframe)
         with self._lock:
             cached = self._ohlcv.get(key)
-        if not refresh and cached is not None:
+        hit = self._reuse_memory(cached, refresh, symbol, timeframe, "ohlcv")
+        if hit is not None:
             if progress is not None:
                 progress.emit(
                     75, f"Using cached {timeframe}", stage="cache", done=1, total=1)
-            return cached
+            return hit
 
         on_file, on_bytes = _download_callbacks(progress, 8.0, 62.0)
         if progress is not None:
@@ -859,7 +1175,7 @@ class OhlcvStore:
         )
         if progress is not None:
             progress.emit(78, f"Loaded {len(frame):,} bars", stage="prepare")
-        frame = attach_source_mas(frame)
+        frame = clip_rth_ohlcv(frame)
         resolved = _resolve_name(list_ohlcv_symbols(), symbol) or symbol
         entry = CacheEntry(
             frame=frame,
@@ -881,17 +1197,18 @@ class OhlcvStore:
     ) -> CacheEntry:
         with self._lock:
             cached = self._trades.get(symbol)
-        if not refresh and cached is not None:
+        hit = self._reuse_memory(cached, refresh, symbol, "", "trades")
+        if hit is not None:
             if progress is not None:
                 progress.emit(
                     46,
-                    f"Using cached trades ({len(cached.frame):,} ticks)",
+                    f"Using cached trades ({len(hit.frame):,} ticks)",
                     stage="cache",
                 )
-            return cached
+            return hit
 
         on_file, on_bytes = _download_callbacks(
-            progress, 8.0, 38.0, prefix="Downloading trades "
+            progress, 8.0, 38.0, prefix="Loading trades "
         )
         if progress is not None:
             progress.emit(4, f"Listing trades for {symbol}", stage="lookup")
@@ -924,11 +1241,7 @@ class OhlcvStore:
         key = (symbol, timeframe)
         with self._lock:
             cached = self._agg.get(key)
-        if (
-            not refresh
-            and cached is not None
-            and cached.fingerprint == trades.fingerprint
-        ):
+        if cached is not None and cached.fingerprint == trades.fingerprint:
             if progress is not None:
                 progress.emit(
                     75,

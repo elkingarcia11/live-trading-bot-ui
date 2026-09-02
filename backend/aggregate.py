@@ -81,16 +81,32 @@ def aggregate_ohlcv(
     frame = _prepare_ohlcv(bars)
     if frame.empty:
         return _empty_ohlcv()
+    before = len(frame)
+    frame = filter_rth(frame)
+    note(f"RTH 9:30–4:00 ET: {len(frame):,} of {before:,} bars", 0.3)
+    if frame.empty:
+        return _empty_ohlcv()
     if kind == "tick" and size == 1:
         note(f"Using {len(frame):,} 1t bars", 0.8)
         return attach_source_mas(frame)
     if kind == "tick":
-        note(f"Grouping every {size} bars", 0.4)
+        note(f"Grouping every {size} RTH bars", 0.4)
         out = _tick_ohlcv_bars(frame, size)
     else:
-        note(f"Bucketing bars to {spec}", 0.4)
+        note(f"Bucketing RTH bars to {spec}", 0.4)
         out = _time_ohlcv_bars(frame, size)
     note(f"Computing source MAs on {len(out):,} bars", 0.8)
+    return attach_source_mas(out)
+
+
+def clip_rth_ohlcv(frame: pd.DataFrame) -> pd.DataFrame:
+    """Keep [09:30, 16:00) ET bars and recompute source MAs on that series."""
+    if frame.empty or "timestamp" not in frame.columns:
+        return frame
+    out = filter_rth(frame)
+    drop = [col for col in (EMA_COL, SMA_COL) if col in out.columns]
+    if drop:
+        out = out.drop(columns=drop)
     return attach_source_mas(out)
 
 
@@ -167,8 +183,8 @@ def _time_ohlcv_bars(bars: pd.DataFrame, seconds: int) -> pd.DataFrame:
         freq = f"{seconds // 60}min"
     else:
         freq = f"{seconds}s"
-    chicago = bars["timestamp"].dt.tz_convert("America/Chicago")
-    bucket = chicago.dt.floor(freq)
+    eastern = bars["timestamp"].dt.tz_convert("America/New_York")
+    bucket = eastern.dt.floor(freq)
     grouped = bars.assign(_bucket=bucket).groupby("_bucket", sort=True)
     out = grouped.agg(
         open=("open", "first"),
@@ -206,8 +222,8 @@ def _time_bars(trades: pd.DataFrame, seconds: int) -> pd.DataFrame:
         freq = f"{seconds // 60}min"
     else:
         freq = f"{seconds}s"
-    chicago = trades["timestamp"].dt.tz_convert("America/Chicago")
-    bucket = chicago.dt.floor(freq)
+    eastern = trades["timestamp"].dt.tz_convert("America/New_York")
+    bucket = eastern.dt.floor(freq)
     grouped = trades.assign(_bucket=bucket).groupby("_bucket", sort=True)
     out = grouped.agg(
         open=("price", "first"),

@@ -4,14 +4,144 @@ import { fetchCatalog, fetchChart, fetchMeta, fetchTimeframes, streamChart, watc
 import { isEmaOptimizationAbort, runEmaOptimization } from "./emaOptimizer";
 import { isGmaMacdOptimizationAbort, runGmaMacdOptimization } from "./gmaMacdOptimizer";
 import { computeDualEma } from "./ema";
+import { computeDualGma } from "./gma";
 import { computeGmaMacd } from "./gmaMacd";
 import { isOptimizationAbort, runFrontendOptimization, runMultiTimeframeOptimization, type CrossTfProgress, type CrossTfResult, type LabelScoringOptions } from "./gmaOptimizer";
 import SessionStats, { emaWarmupBars, gmaWarmupBars } from "./SessionStats";
-import { CROSS_TF_OPTIMIZE_OPTIONS, CUSTOM_TIMEFRAME, DEFAULT_EMA_PARAMS, DEFAULT_GMA_MACD_PARAMS, DEFAULT_MANUAL_WINDOW, DEFAULT_PARAMS, EMA_LENGTH_MAX, EMA_LENGTH_MIN, EMA_OPTIMIZE_OPTIONS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_MACD_LENGTH_MAX, GMA_MACD_LENGTH_MIN, GMA_MACD_OPTIMIZE_OPTIONS, GMA_MACD_SIGMA_MAX, GMA_MACD_SIGMA_MIN, GMA_MACD_SIGNAL_LENGTH_MAX, GMA_SIGMA_MAX, GMA_SIGMA_MIN, clampEmaParams, clampGmaMacdParams, clampGmaParams, gmaMacdFastScale, gmaMacdSlowScale, gmaScale, isValidEmaPair, isValidGmaMacdConfig, isValidGmaPair, isValidTimeframeSpec, normalizeTimeframeSpec, OPTIMIZE_OPTIONS, type Bar, type EmaOptimizeMetric, type EmaOptimizeResult, type EmaParams, type GmaMacdOptimizeMetric, type GmaMacdOptimizeResult, type GmaMacdParams, type GmaParams, type LoadProgress, type ManualEntryWindow, type ManualPoint, type ManualSelectionMode, type OptimizeMetric, type OptimizeProgress, type OptimizeResult } from "./types";
+import { CROSS_TF_OPTIMIZE_OPTIONS, CUSTOM_TIMEFRAME, DEFAULT_DUAL_MA_THRESHOLDS, DEFAULT_EMA_PARAMS, DEFAULT_GMA_MACD_PARAMS, DEFAULT_MANUAL_WINDOW, DEFAULT_PARAMS, EMA_LENGTH_MAX, EMA_LENGTH_MIN, EMA_OPTIMIZE_OPTIONS, GMA_LENGTH_MAX, GMA_LENGTH_MIN, GMA_MACD_LENGTH_MAX, GMA_MACD_LENGTH_MIN, GMA_MACD_OPTIMIZE_OPTIONS, GMA_MACD_SIGMA_MAX, GMA_MACD_SIGMA_MIN, GMA_MACD_SIGNAL_LENGTH_MAX, GMA_SIGMA_MAX, GMA_SIGMA_MIN, MA_THRESHOLD_MAX, MA_THRESHOLD_MIN, MA_THRESHOLD_STEP, clampEmaParams, clampGmaMacdParams, clampGmaParams, gmaScale, isUsableEmaParams, isUsableGmaMacdParams, isUsableGmaParams, isValidTimeframeSpec, normalizeDualMaThresholds, normalizeTimeframeSpec, OPTIMIZE_OPTIONS, type Bar, type DualMaThresholds, type EmaOptimizeMetric, type EmaOptimizeResult, type EmaParams, type GmaMacdOptimizeMetric, type GmaMacdOptimizeResult, type GmaMacdParams, type GmaParams, type LoadProgress, type ManualEntryWindow, type ManualPoint, type ManualSelectionMode, type OptimizeMetric, type OptimizeProgress, type OptimizeResult } from "./types";
 
 import { computeTradeStats, withActions, type SignalConfig } from "./tradeStats";
 
 type SidebarTab = "gma" | "ema" | "gmaMacd";
+
+/** Range thumbs stay at the optimization bound unless a custom value is outside it. */
+function sliderMin(optMin: number, value: number): number {
+  return Math.min(optMin, Number.isFinite(value) ? value : optMin);
+}
+
+function sliderMax(optMax: number, value: number): number {
+  return Math.max(optMax, Number.isFinite(value) ? value : optMax);
+}
+
+function formatScale(length: number, sigma: number): string {
+  const ratio = gmaScale(length, sigma);
+  return Number.isFinite(ratio) ? ratio.toFixed(2) : "—";
+}
+
+function DualMaSignalRules({
+  thresholds,
+  useThresholds,
+}: {
+  thresholds: DualMaThresholds;
+  useThresholds: boolean;
+}) {
+  if (!useThresholds) {
+    return (
+      <dl className="config-rules">
+        <div>
+          <dt className="long">Long</dt>
+          <dd>Fast crosses above slow</dd>
+        </div>
+        <div>
+          <dt className="short">Short</dt>
+          <dd>Fast crosses below slow</dd>
+        </div>
+        <div>
+          <dt>Exit</dt>
+          <dd>Opposite crossover</dd>
+        </div>
+      </dl>
+    );
+  }
+  return (
+    <dl className="config-rules">
+      <div>
+        <dt className="long">Long</dt>
+        <dd>
+          Fast is {thresholds.maSpread}+ above slow, or close is {thresholds.closeMin}+ above slow
+        </dd>
+      </div>
+      <div>
+        <dt className="short">Short</dt>
+        <dd>
+          Fast is {thresholds.maSpread}+ below slow, or close is {thresholds.closeMin}+ below fast or slow
+        </dd>
+      </div>
+      <div>
+        <dt>Exit</dt>
+        <dd>When every reason that opened the trade reverses</dd>
+      </div>
+    </dl>
+  );
+}
+
+function GmaOptimizeBounds() {
+  return (
+    <>
+      <p className="config-lede">
+        Tries every valid GMA pair on this chart and keeps the highest score.
+      </p>
+      <dl className="config-rules">
+        <div>
+          <dt>Length</dt>
+          <dd>At least 2 bars</dd>
+        </div>
+        <div>
+          <dt>Pair</dt>
+          <dd>Fast shorter than slow</dd>
+        </div>
+        <div>
+          <dt>Ratio</dt>
+          <dd>Length ÷ sigma at most 3, and fast below slow</dd>
+        </div>
+      </dl>
+    </>
+  );
+}
+
+function EmaOptimizeBounds() {
+  return (
+    <>
+      <p className="config-lede">
+        Tries every valid fast/slow EMA pair on this chart and keeps the highest score.
+      </p>
+      <dl className="config-rules">
+        <div>
+          <dt>Length</dt>
+          <dd>1 to 100 bars</dd>
+        </div>
+        <div>
+          <dt>Pair</dt>
+          <dd>Fast shorter than slow</dd>
+        </div>
+      </dl>
+    </>
+  );
+}
+
+function GmaMacdOptimizeBounds() {
+  return (
+    <>
+      <p className="config-lede">
+        Tries valid fast, slow, and signal GMA triples and keeps the highest score.
+      </p>
+      <dl className="config-rules">
+        <div>
+          <dt>Pair</dt>
+          <dd>Fast shorter than slow</dd>
+        </div>
+        <div>
+          <dt>Ratio</dt>
+          <dd>Length ÷ sigma at most 3, and fast below slow</dd>
+        </div>
+        <div>
+          <dt>Signal</dt>
+          <dd>Length 1 to 15 bars</dd>
+        </div>
+      </dl>
+    </>
+  );
+}
 
 function formatClock(iso: string | null, zone: ChartZone): string {
   if (!iso) return "—";
@@ -73,6 +203,77 @@ function emaOptimizationLabel(metric: EmaOptimizeMetric): string {
   return EMA_OPTIMIZE_OPTIONS.find((option) => option.id === metric)?.label.replace("Maximize ", "") ?? metric;
 }
 
+function formatThreshold(value: number | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return String(Math.round(value * 100) / 100);
+}
+
+function resultThresholds(
+  result: { params: { ma_spread?: number; close_min?: number } },
+  fallback: DualMaThresholds,
+): DualMaThresholds {
+  return normalizeDualMaThresholds({
+    maSpread: result.params.ma_spread ?? fallback.maSpread,
+    closeMin: result.params.close_min ?? fallback.closeMin,
+  });
+}
+
+function DualMaThresholdInputs({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: DualMaThresholds;
+  disabled: boolean;
+  onChange: (next: DualMaThresholds) => void;
+}) {
+  return (
+    <>
+      <p className="indicator-sub">Entry thresholds</p>
+      <label className="threshold-field">
+        From MA
+        <input
+          type="range"
+          min={sliderMin(MA_THRESHOLD_MIN, value.maSpread)}
+          max={sliderMax(MA_THRESHOLD_MAX, value.maSpread)}
+          step={MA_THRESHOLD_STEP}
+          value={value.maSpread}
+          disabled={disabled}
+          onChange={(e) => onChange({ ...value, maSpread: Number(e.target.value) })}
+        />
+        <input
+          type="number"
+          min={0}
+          step={MA_THRESHOLD_STEP}
+          value={value.maSpread}
+          disabled={disabled}
+          onChange={(e) => onChange({ ...value, maSpread: Math.max(0, Number(e.target.value) || 0) })}
+        />
+      </label>
+      <label className="threshold-field">
+        From close
+        <input
+          type="range"
+          min={sliderMin(MA_THRESHOLD_MIN, value.closeMin)}
+          max={sliderMax(MA_THRESHOLD_MAX, value.closeMin)}
+          step={MA_THRESHOLD_STEP}
+          value={value.closeMin}
+          disabled={disabled}
+          onChange={(e) => onChange({ ...value, closeMin: Number(e.target.value) })}
+        />
+        <input
+          type="number"
+          min={0}
+          step={MA_THRESHOLD_STEP}
+          value={value.closeMin}
+          disabled={disabled}
+          onChange={(e) => onChange({ ...value, closeMin: Math.max(0, Number(e.target.value) || 0) })}
+        />
+      </label>
+    </>
+  );
+}
+
 export default function App() {
   const [catalog, setCatalog] = useState<Record<string, string[]>>({});
   const [timeframesBySymbol, setTimeframesBySymbol] = useState<Record<string, string[]>>({});
@@ -82,7 +283,7 @@ export default function App() {
   const [customMode, setCustomMode] = useState(false);
   const [customDraft, setCustomDraft] = useState("");
   const [source, setSource] = useState<"ohlcv" | "trades" | "continuous" | "">("");
-  const [chartZone, setChartZone] = useState<ChartZone>("local");
+  const [chartZone, setChartZone] = useState<ChartZone>("et");
   const [params, setParams] = useState<GmaParams>(DEFAULT_PARAMS);
   const [draft, setDraft] = useState<GmaParams>(DEFAULT_PARAMS);
   const [bars, setBars] = useState<Bar[]>([]);
@@ -92,7 +293,6 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "live" | "stale">("idle");
   const [busy, setBusy] = useState(false);
-  const [applyingConfig, setApplyingConfig] = useState(false);
   const [chartProgress, setChartProgress] = useState<LoadProgress | null>(null);
   const [optimizationFeature, setOptimizationFeature] = useState<OptimizeMetric>("total_profit_pct");
   const [minTrades, setMinTrades] = useState(1);
@@ -106,8 +306,10 @@ export default function App() {
   const [crossTfOptimizing, setCrossTfOptimizing] = useState(false);
   const [gmaApplied, setGmaApplied] = useState(false);
   const [emaDraft, setEmaDraft] = useState<EmaParams>(DEFAULT_EMA_PARAMS);
+  const [emaParams, setEmaParams] = useState<EmaParams>(DEFAULT_EMA_PARAMS);
   const [emaApplied, setEmaApplied] = useState(false);
   const [gmaMacdDraft, setGmaMacdDraft] = useState<GmaMacdParams>(DEFAULT_GMA_MACD_PARAMS);
+  const [gmaMacdParams, setGmaMacdParams] = useState<GmaMacdParams>(DEFAULT_GMA_MACD_PARAMS);
   const [gmaMacdApplied, setGmaMacdApplied] = useState(false);
   const [gmaMacdOptimizationFeature, setGmaMacdOptimizationFeature] = useState<GmaMacdOptimizeMetric>("total_profit_pct");
   const [gmaMacdOptimizationProgress, setGmaMacdOptimizationProgress] = useState<OptimizeProgress | null>(null);
@@ -120,6 +322,14 @@ export default function App() {
   const [activeSidebarTab, setActiveSidebarTab] = useState<SidebarTab>("gma");
   const [configGma, setConfigGma] = useState(true);
   const [optimizeGma, setOptimizeGma] = useState(true);
+  const [gmaThresholds, setGmaThresholds] = useState<DualMaThresholds>(DEFAULT_DUAL_MA_THRESHOLDS);
+  const [appliedGmaThresholds, setAppliedGmaThresholds] = useState<DualMaThresholds>(DEFAULT_DUAL_MA_THRESHOLDS);
+  const [appliedGmaUseThresholds, setAppliedGmaUseThresholds] = useState(false);
+  const [emaThresholds, setEmaThresholds] = useState<DualMaThresholds>(DEFAULT_DUAL_MA_THRESHOLDS);
+  const [appliedEmaThresholds, setAppliedEmaThresholds] = useState<DualMaThresholds>(DEFAULT_DUAL_MA_THRESHOLDS);
+  const [appliedEmaUseThresholds, setAppliedEmaUseThresholds] = useState(false);
+  const [optimizeGmaThresholds, setOptimizeGmaThresholds] = useState(false);
+  const [optimizeEmaThresholds, setOptimizeEmaThresholds] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [manualMode, setManualMode] = useState<ManualSelectionMode>("off");
   const [entryPoints, setEntryPoints] = useState<ManualPoint[]>([]);
@@ -130,6 +340,7 @@ export default function App() {
   const requestRef = useRef(0);
   const busyRef = useRef(false);
   const chartHandleRef = useRef<ChartHandle | null>(null);
+  const sidebarRef = useRef<HTMLElement | null>(null);
   const gmaOptAbortRef = useRef<AbortController | null>(null);
   const gmaMacdOptAbortRef = useRef<AbortController | null>(null);
   const emaOptAbortRef = useRef<AbortController | null>(null);
@@ -148,34 +359,43 @@ export default function App() {
   const effectiveTf = timeframe;
   const dataSource = "continuous" as const;
   const last = bars.at(-1) ?? null;
-  const fastScale = gmaScale(draft.fastLength, draft.fastSigma);
-  const slowScale = gmaScale(draft.slowLength, draft.slowSigma);
-  const gmaPairOk = isValidGmaPair(draft);
-  const emaPairOk = isValidEmaPair(emaDraft);
-  const gmaMacdConfigOk = isValidGmaMacdConfig(gmaMacdDraft);
-  const gmaMacdFastScaleVal = gmaMacdFastScale(gmaMacdDraft);
-  const gmaMacdSlowScaleVal = gmaMacdSlowScale(gmaMacdDraft);
+  const gmaUsable = isUsableGmaParams(draft);
+  const emaUsable = isUsableEmaParams(emaDraft);
+  const gmaMacdUsable = isUsableGmaMacdParams(gmaMacdDraft);
   const gmaTabActive = gmaApplied;
   const configActive = gmaTabActive || emaApplied || gmaMacdApplied;
-  const configValid = configGma && gmaPairOk;
+  const configValid = (configGma && gmaUsable) || (gmaApplied && !configGma);
+  const gmaBars = useMemo(() => {
+    if (!gmaApplied || !isUsableGmaParams(params)) return bars;
+    const series = computeDualGma(
+      bars.map((bar) => bar.close),
+      params,
+    );
+    return bars.map((bar, i) => ({
+      ...bar,
+      gma_fast: series.fast[i],
+      gma_slow: series.slow[i],
+      signal: null,
+    }));
+  }, [bars, gmaApplied, params]);
   const signalConfig = useMemo((): SignalConfig | undefined => {
     if (!configActive) return undefined;
-    if (gmaMacdApplied && gmaMacdConfigOk) {
+    if (gmaMacdApplied && isUsableGmaMacdParams(gmaMacdParams)) {
       return {
         useGma: false,
         useMacd: false,
         useGmaMacd: true,
         gmaMacdHist: computeGmaMacd(
-          bars.map((bar) => bar.close),
-          gmaMacdDraft,
+          gmaBars.map((bar) => bar.close),
+          gmaMacdParams,
         ).hist,
       };
     }
-    if (emaApplied && emaPairOk) {
+    if (emaApplied && isUsableEmaParams(emaParams)) {
       const series = computeDualEma(
-        bars.map((bar) => bar.close),
-        emaDraft.fast,
-        emaDraft.slow,
+        gmaBars.map((bar) => bar.close),
+        emaParams.fast,
+        emaParams.slow,
       );
       return {
         useGma: false,
@@ -183,32 +403,41 @@ export default function App() {
         useEma: true,
         emaFast: series.fast,
         emaSlow: series.slow,
+        maSpreadMin: appliedEmaThresholds.maSpread,
+        maCloseMin: appliedEmaThresholds.closeMin,
+        useMaThresholds: appliedEmaUseThresholds,
       };
     }
     if (!gmaTabActive) return undefined;
     return {
       useGma: gmaApplied,
       useMacd: false,
+      maSpreadMin: appliedGmaThresholds.maSpread,
+      maCloseMin: appliedGmaThresholds.closeMin,
+      useMaThresholds: appliedGmaUseThresholds,
     };
-  }, [bars, configActive, gmaMacdApplied, gmaMacdConfigOk, gmaMacdDraft, emaApplied, emaPairOk, emaDraft, gmaTabActive, gmaApplied]);
+  }, [gmaBars, configActive, gmaMacdApplied, gmaMacdParams, emaApplied, emaParams, appliedEmaThresholds, appliedEmaUseThresholds, gmaTabActive, gmaApplied, appliedGmaThresholds, appliedGmaUseThresholds]);
   const labeledBars = useMemo(
-    () => (signalConfig ? withActions(bars, signalConfig) : bars),
-    [bars, signalConfig],
+    () => (signalConfig ? withActions(gmaBars, signalConfig) : gmaBars),
+    [gmaBars, signalConfig],
   );
   const gmaTradeStats = useMemo(() => {
     if (!gmaTabActive) return computeTradeStats([]);
     const gmaSignal: SignalConfig = {
       useGma: gmaApplied,
       useMacd: false,
+      maSpreadMin: appliedGmaThresholds.maSpread,
+      maCloseMin: appliedGmaThresholds.closeMin,
+      useMaThresholds: appliedGmaUseThresholds,
     };
-    return computeTradeStats(withActions(bars, gmaSignal));
-  }, [bars, gmaTabActive, gmaApplied]);
+    return computeTradeStats(withActions(gmaBars, gmaSignal));
+  }, [gmaBars, gmaTabActive, gmaApplied, appliedGmaThresholds, appliedGmaUseThresholds]);
   const emaTradeStats = useMemo(() => {
-    if (!emaApplied || !emaPairOk) return computeTradeStats([]);
+    if (!emaApplied || !isUsableEmaParams(emaParams)) return computeTradeStats([]);
     const series = computeDualEma(
       bars.map((bar) => bar.close),
-      emaDraft.fast,
-      emaDraft.slow,
+      emaParams.fast,
+      emaParams.slow,
     );
     return computeTradeStats(
       withActions(bars, {
@@ -217,11 +446,14 @@ export default function App() {
         useEma: true,
         emaFast: series.fast,
         emaSlow: series.slow,
+        maSpreadMin: appliedEmaThresholds.maSpread,
+        maCloseMin: appliedEmaThresholds.closeMin,
+        useMaThresholds: appliedEmaUseThresholds,
       }),
     );
-  }, [bars, emaApplied, emaPairOk, emaDraft]);
+  }, [bars, emaApplied, emaParams, appliedEmaThresholds, appliedEmaUseThresholds]);
   const gmaMacdTradeStats = useMemo(() => {
-    if (!gmaMacdApplied || !gmaMacdConfigOk) return computeTradeStats([]);
+    if (!gmaMacdApplied || !isUsableGmaMacdParams(gmaMacdParams)) return computeTradeStats([]);
     return computeTradeStats(
       withActions(bars, {
         useGma: false,
@@ -229,11 +461,11 @@ export default function App() {
         useGmaMacd: true,
         gmaMacdHist: computeGmaMacd(
           bars.map((bar) => bar.close),
-          gmaMacdDraft,
+          gmaMacdParams,
         ).hist,
       }),
     );
-  }, [bars, gmaMacdApplied, gmaMacdConfigOk, gmaMacdDraft]);
+  }, [bars, gmaMacdApplied, gmaMacdParams]);
 
   const loadCatalog = useCallback(async () => {
     const data = await fetchCatalog();
@@ -326,7 +558,6 @@ export default function App() {
           busyRef.current = false;
           setBusy(false);
           setChartProgress(null);
-          setApplyingConfig(false);
         }
       }
     },
@@ -343,11 +574,11 @@ export default function App() {
   useEffect(() => {
     if (!symbol || !effectiveTf) return;
     const pair = `${symbol}|${effectiveTf}|${dataSource}`;
-    const refresh = pairRef.current !== pair;
+    const pairChanged = pairRef.current !== pair;
     pairRef.current = pair;
-    if (refresh) setStatus("loading");
-    loadChart(refresh, symbol, effectiveTf, params).catch(() => undefined);
-  }, [symbol, effectiveTf, dataSource, params, loadChart]);
+    if (pairChanged) setStatus("loading");
+    loadChart(false, symbol, effectiveTf, paramsRef.current).catch(() => undefined);
+  }, [symbol, effectiveTf, dataSource, loadChart]);
 
   useEffect(() => {
     if (locked || !symbol || !effectiveTf) return;
@@ -440,9 +671,15 @@ export default function App() {
     setDraft(DEFAULT_PARAMS);
     setParams(DEFAULT_PARAMS);
     setGmaApplied(false);
+    setAppliedGmaThresholds(DEFAULT_DUAL_MA_THRESHOLDS);
+    setAppliedGmaUseThresholds(false);
     setEmaDraft(DEFAULT_EMA_PARAMS);
+    setEmaParams(DEFAULT_EMA_PARAMS);
     setEmaApplied(false);
+    setAppliedEmaThresholds(DEFAULT_DUAL_MA_THRESHOLDS);
+    setAppliedEmaUseThresholds(false);
     setGmaMacdDraft(DEFAULT_GMA_MACD_PARAMS);
+    setGmaMacdParams(DEFAULT_GMA_MACD_PARAMS);
     setGmaMacdApplied(false);
     setConfigGma(true);
     setOptimizeGma(true);
@@ -536,21 +773,41 @@ export default function App() {
     [entryPoints, exitPoints, entryWindow],
   );
 
+  const revealIndicatorConfig = () => {
+    setSidebarCollapsed(false);
+    window.setTimeout(() => {
+      const node = sidebarRef.current;
+      if (node) node.scrollTop = 0;
+    }, 0);
+  };
+
   const applyConfiguration = () => {
     if (locked || !configValid || !symbol || !effectiveTf || busy) return;
     setGmaApplied(configGma);
-    setApplyingConfig(true);
-    setStatus("loading");
     if (configGma) {
-      setParams(draft);
-    } else {
-      loadChart(true, symbol, effectiveTf, paramsRef.current).catch(() => undefined);
+      const next: GmaParams = {
+        fastLength: Math.max(1, Math.round(draft.fastLength) || 1),
+        fastSigma: draft.fastSigma,
+        slowLength: Math.max(1, Math.round(draft.slowLength) || 1),
+        slowSigma: draft.slowSigma,
+      };
+      setDraft(next);
+      setParams(next);
+      setAppliedGmaThresholds(normalizeDualMaThresholds(gmaThresholds));
+      setAppliedGmaUseThresholds(optimizeGmaThresholds);
     }
   };
 
   const applyEmaConfiguration = () => {
-    if (locked || !emaPairOk || !symbol || !effectiveTf || busy || emaOptimizing) return;
-    setEmaDraft(clampEmaParams(emaDraft));
+    if (locked || !emaUsable || !symbol || !effectiveTf || busy || emaOptimizing) return;
+    const next = {
+      fast: Math.max(1, Math.round(emaDraft.fast) || 1),
+      slow: Math.max(1, Math.round(emaDraft.slow) || 1),
+    };
+    setEmaDraft(next);
+    setEmaParams(next);
+    setAppliedEmaThresholds(normalizeDualMaThresholds(emaThresholds));
+    setAppliedEmaUseThresholds(optimizeEmaThresholds);
     setEmaApplied(true);
   };
 
@@ -573,6 +830,7 @@ export default function App() {
         maxTrades,
         (progress) => setEmaOptimizationProgress(progress),
         controller.signal,
+        { ...emaThresholds, optimizeThresholds: optimizeEmaThresholds },
       );
       if (emaOptAbortRef.current !== controller) return;
       setEmaOptimizationResult(result);
@@ -594,12 +852,26 @@ export default function App() {
       fast: emaOptimizationResult.params.fast_length,
       slow: emaOptimizationResult.params.slow_length,
     });
+    const thresholds = resultThresholds(emaOptimizationResult, emaThresholds);
     setEmaDraft(best);
+    setEmaParams(best);
+    setEmaThresholds(thresholds);
+    setAppliedEmaThresholds(thresholds);
+    setAppliedEmaUseThresholds(optimizeEmaThresholds);
     setEmaApplied(true);
+    revealIndicatorConfig();
   };
 
   const applyGmaMacdConfiguration = () => {
-    if (locked || !gmaMacdConfigOk || !symbol || !effectiveTf || busy) return;
+    if (locked || !gmaMacdUsable || !symbol || !effectiveTf || busy) return;
+    const next = {
+      ...gmaMacdDraft,
+      fastLength: Math.max(1, Math.round(gmaMacdDraft.fastLength) || 1),
+      slowLength: Math.max(1, Math.round(gmaMacdDraft.slowLength) || 1),
+      signalLength: Math.max(1, Math.round(gmaMacdDraft.signalLength) || 1),
+    };
+    setGmaMacdDraft(next);
+    setGmaMacdParams(next);
     setGmaMacdApplied(true);
   };
 
@@ -648,7 +920,9 @@ export default function App() {
       signalSigma: gmaMacdOptimizationResult.params.signal_sigma,
     });
     setGmaMacdDraft(best);
+    setGmaMacdParams(best);
     setGmaMacdApplied(true);
+    revealIndicatorConfig();
   };
 
   const optimizeGmas = async () => {
@@ -671,6 +945,8 @@ export default function App() {
         (progress) => setOptimizationProgress(progress),
         labelScoring,
         controller.signal,
+        undefined,
+        { ...gmaThresholds, optimizeThresholds: optimizeGmaThresholds },
       );
       if (gmaOptAbortRef.current !== controller) return;
       setOptimizationResult(result);
@@ -694,12 +970,15 @@ export default function App() {
       slowLength: optimizationResult.params.slow_length,
       slowSigma: optimizationResult.params.slow_sigma,
     });
+    const thresholds = resultThresholds(optimizationResult, gmaThresholds);
     setDraft(best);
     setParams(best);
+    setGmaThresholds(thresholds);
+    setAppliedGmaThresholds(thresholds);
+    setAppliedGmaUseThresholds(optimizeGmaThresholds);
     setConfigGma(true);
     setGmaApplied(true);
-    setApplyingConfig(true);
-    setStatus("loading");
+    revealIndicatorConfig();
   };
 
   const optimizeCrossTimeframes = async () => {
@@ -727,6 +1006,8 @@ export default function App() {
         (progress) => setCrossTfProgress(progress),
         labelScoring,
         controller.signal,
+        undefined,
+        { ...gmaThresholds, optimizeThresholds: optimizeGmaThresholds },
       );
       if (crossTfAbortRef.current !== controller) return;
       setCrossTfResult(result);
@@ -750,12 +1031,15 @@ export default function App() {
       slowLength: crossTfResult.params.slow_length,
       slowSigma: crossTfResult.params.slow_sigma,
     });
+    const thresholds = resultThresholds(crossTfResult, gmaThresholds);
     setDraft(best);
     setParams(best);
+    setGmaThresholds(thresholds);
+    setAppliedGmaThresholds(thresholds);
+    setAppliedGmaUseThresholds(optimizeGmaThresholds);
     setConfigGma(true);
     setGmaApplied(true);
-    setApplyingConfig(true);
-    setStatus("loading");
+    revealIndicatorConfig();
   };
 
   return (
@@ -899,7 +1183,7 @@ export default function App() {
         </div>
       </header>
 
-      <aside className="sidebar">
+      <aside className="sidebar" ref={sidebarRef}>
         <button
           type="button"
           className="sidebar-toggle"
@@ -935,7 +1219,10 @@ export default function App() {
         {activeSidebarTab === "gma" && (
         <>
         <section className="indicators">
-          <h2>Indicators</h2>
+          <h2>GMA</h2>
+          <p className="config-lede">
+            Dual Gaussian moving averages. Fast is applied to a 3-bar EMA of close; slow to a 3-bar SMA.
+          </p>
           <div className={`indicator${gmaApplied ? " active" : ""}`}>
             <label className="indicator-toggle">
               <input
@@ -944,40 +1231,38 @@ export default function App() {
                 disabled={locked || busy || optimizing}
                 onChange={(event) => setConfigGma(event.target.checked)}
               />
-              GMA
+              On chart
             </label>
-            <p className="hint">
-              Fast EMA 3 · L {draft.fastLength} · σ {draft.fastSigma.toFixed(1)} · L/σ {fastScale.toFixed(2)}
-            </p>
-            <p className="hint">
-              Slow SMA 3 · L {draft.slowLength} · σ {draft.slowSigma.toFixed(1)} · L/σ {slowScale.toFixed(2)}
-            </p>
-            <p className="indicator-sub">Fast</p>
-            <label>
+            <div className="indicator-sub-row">
+              <p className="indicator-sub">Fast</p>
+              <span className="param-meta" title="Length ÷ sigma">
+                EMA 3 · L/σ {formatScale(draft.fastLength, draft.fastSigma)}
+              </span>
+            </div>
+            <label title="Lookback window in bars">
               Length
               <input
                 type="range"
-                min={GMA_LENGTH_MIN}
-                max={GMA_LENGTH_MAX}
+                min={sliderMin(GMA_LENGTH_MIN, draft.fastLength)}
+                max={sliderMax(GMA_LENGTH_MAX, draft.fastLength)}
                 value={draft.fastLength}
                 disabled={locked}
                 onChange={(e) => setDraft({ ...draft, fastLength: Number(e.target.value) })}
               />
               <input
                 type="number"
-                min={GMA_LENGTH_MIN}
-                max={GMA_LENGTH_MAX}
+                min={1}
                 value={draft.fastLength}
                 disabled={locked}
                 onChange={(e) => setDraft({ ...draft, fastLength: Number(e.target.value) })}
               />
             </label>
-            <label>
+            <label title="Gaussian width. Higher is smoother and lowers L/σ">
               Sigma
               <input
                 type="range"
-                min={GMA_SIGMA_MIN}
-                max={GMA_SIGMA_MAX}
+                min={sliderMin(GMA_SIGMA_MIN, draft.fastSigma)}
+                max={sliderMax(GMA_SIGMA_MAX, draft.fastSigma)}
                 step={0.5}
                 value={draft.fastSigma}
                 disabled={locked}
@@ -985,40 +1270,43 @@ export default function App() {
               />
               <input
                 type="number"
-                min={GMA_SIGMA_MIN}
-                max={GMA_SIGMA_MAX}
-                step={0.5}
+                min={0.01}
+                step="any"
                 value={draft.fastSigma}
                 disabled={locked}
                 onChange={(e) => setDraft({ ...draft, fastSigma: Number(e.target.value) })}
               />
             </label>
-            <p className="indicator-sub">Slow</p>
-            <label>
+            <div className="indicator-sub-row">
+              <p className="indicator-sub">Slow</p>
+              <span className="param-meta" title="Length ÷ sigma">
+                SMA 3 · L/σ {formatScale(draft.slowLength, draft.slowSigma)}
+              </span>
+            </div>
+            <label title="Lookback window in bars">
               Length
               <input
                 type="range"
-                min={GMA_LENGTH_MIN}
-                max={GMA_LENGTH_MAX}
+                min={sliderMin(GMA_LENGTH_MIN, draft.slowLength)}
+                max={sliderMax(GMA_LENGTH_MAX, draft.slowLength)}
                 value={draft.slowLength}
                 disabled={locked}
                 onChange={(e) => setDraft({ ...draft, slowLength: Number(e.target.value) })}
               />
               <input
                 type="number"
-                min={GMA_LENGTH_MIN}
-                max={GMA_LENGTH_MAX}
+                min={1}
                 value={draft.slowLength}
                 disabled={locked}
                 onChange={(e) => setDraft({ ...draft, slowLength: Number(e.target.value) })}
               />
             </label>
-            <label>
+            <label title="Gaussian width. Higher is smoother and lowers L/σ">
               Sigma
               <input
                 type="range"
-                min={GMA_SIGMA_MIN}
-                max={GMA_SIGMA_MAX}
+                min={sliderMin(GMA_SIGMA_MIN, draft.slowSigma)}
+                max={sliderMax(GMA_SIGMA_MAX, draft.slowSigma)}
                 step={0.5}
                 value={draft.slowSigma}
                 disabled={locked}
@@ -1026,25 +1314,28 @@ export default function App() {
               />
               <input
                 type="number"
-                min={GMA_SIGMA_MIN}
-                max={GMA_SIGMA_MAX}
-                step={0.5}
+                min={0.01}
+                step="any"
                 value={draft.slowSigma}
                 disabled={locked}
                 onChange={(e) => setDraft({ ...draft, slowSigma: Number(e.target.value) })}
               />
             </label>
-            {!gmaPairOk && (
-              <p className="hint warn">Invalid pair: fast L/σ must be less than slow L/σ</p>
-            )}
-          </div>
-          {!configGma && (
-            <p className="hint warn">Enable GMA to apply</p>
-          )}
           {configGma && (
-            <p className="hint">
-              Long: close 1.5+ above slow, or 3+ above slow · Short: close 1.5+ below fast, or 3+ below slow
-            </p>
+            <>
+              {optimizeGmaThresholds && (
+                <DualMaThresholdInputs
+                  value={gmaThresholds}
+                  disabled={locked || busy || optimizing}
+                  onChange={setGmaThresholds}
+                />
+              )}
+              <DualMaSignalRules thresholds={gmaThresholds} useThresholds={optimizeGmaThresholds} />
+            </>
+          )}
+        </div>
+          {!configGma && (
+            <p className="hint warn">Turn GMA on to apply it to the chart.</p>
           )}
           <button
             type="button"
@@ -1055,16 +1346,11 @@ export default function App() {
               !symbol ||
               !effectiveTf ||
               busy ||
-              optimizing ||
-              applyingConfig
+              optimizing
             }
             onClick={applyConfiguration}
           >
-            {applyingConfig
-              ? chartProgress?.total
-                ? `Applying ${Math.round(chartProgress.pct)}%`
-                : "Applying…"
-              : "Apply Configuration"}
+            Apply Configuration
           </button>
         </section>
         <section className="gma-optimizer">
@@ -1081,19 +1367,15 @@ export default function App() {
                   setCrossTfResult(null);
                 }}
               />
-              GMA
+              Search GMA
             </label>
           </div>
           {!optimizeGma && (
-            <p className="hint warn">Enable GMA to run optimization</p>
+            <p className="hint warn">Turn GMA on to run optimization.</p>
           )}
-          {optimizeGma && (
-            <p className="hint">
-              Grid-search GMA pairs (L≥2, L/σ≤3, fast L/σ &lt; slow L/σ)
-            </p>
-          )}
-          <label className="optimizer-feature">
-            Feature
+          {optimizeGma && <GmaOptimizeBounds />}
+          <label className="optimizer-feature" title="What the search maximizes">
+            Maximize
             <select
               value={optimizationFeature}
               disabled={locked || busy || optimizing || !symbol || !effectiveTf}
@@ -1110,7 +1392,7 @@ export default function App() {
             </select>
           </label>
           <div className="trade-filter">
-            <label>
+            <label title="Skip pairs with fewer closed trades than this">
               Min trades
               <input
                 type="number"
@@ -1120,7 +1402,7 @@ export default function App() {
                 onChange={(e) => setMinTrades(Math.max(1, Number(e.target.value) || 1))}
               />
             </label>
-            <label>
+            <label title="Optional cap on closed trades. Leave empty for no limit">
               Max trades
               <input
                 type="number"
@@ -1135,6 +1417,30 @@ export default function App() {
               />
             </label>
           </div>
+          <div className="optimizer-indicators">
+            <label className="indicator-toggle">
+              <input
+                type="checkbox"
+                checked={optimizeGmaThresholds}
+                disabled={locked || optimizing || !optimizeGma}
+                onChange={(event) => {
+                  setOptimizeGmaThresholds(event.target.checked);
+                  setOptimizationResult(null);
+                }}
+              />
+              Optimize thresholds
+            </label>
+          </div>
+          {optimizeGma && !optimizeGmaThresholds && (
+            <p className="hint">
+              Scores GMA pairs from fast/slow crossovers only.
+            </p>
+          )}
+          {optimizeGma && optimizeGmaThresholds && (
+            <p className="hint">
+              After the best GMA pair, also searches from-MA and from-close distances in {MA_THRESHOLD_STEP} steps ({MA_THRESHOLD_MIN}–{MA_THRESHOLD_MAX}).
+            </p>
+          )}
           <div className="optimizer-actions">
             <button
               type="button"
@@ -1168,8 +1474,8 @@ export default function App() {
           </div>
           {optimizationFeature === "label_score" && !hasManualLabels && (
             <p className="hint optimizer-status">
-              Select entry/exit points in Manual Optimization first — the label
-              score needs ground-truth bars to optimize against.
+              Mark entry and exit points under Manual Optimization first. Label
+              score needs those bars as ground truth.
             </p>
           )}
           {optimizationResult && (
@@ -1179,8 +1485,10 @@ export default function App() {
                 <strong>{optimizationScore(optimizationResult, optimizationFeature)}</strong>
               </div>
               <dl className="optimizer-params">
-                <div><dt>Fast GMA</dt><dd>L {optimizationResult.params.fast_length} · σ {optimizationResult.params.fast_sigma.toFixed(1)}</dd></div>
-                <div><dt>Slow GMA</dt><dd>L {optimizationResult.params.slow_length} · σ {optimizationResult.params.slow_sigma.toFixed(1)}</dd></div>
+                <div><dt>Fast GMA</dt><dd>Length {optimizationResult.params.fast_length} · sigma {optimizationResult.params.fast_sigma.toFixed(1)}</dd></div>
+                <div><dt>Slow GMA</dt><dd>Length {optimizationResult.params.slow_length} · sigma {optimizationResult.params.slow_sigma.toFixed(1)}</dd></div>
+                <div><dt>From MA</dt><dd>{formatThreshold(optimizationResult.params.ma_spread)}</dd></div>
+                <div><dt>From close</dt><dd>{formatThreshold(optimizationResult.params.close_min)}</dd></div>
               </dl>
               {optimizationFeature === "label_score" &&
                 optimizationResult.label_score && (
@@ -1386,59 +1694,63 @@ export default function App() {
         <>
         <section className="indicators">
           <h2>EMA</h2>
+          <p className="config-lede">Two exponential moving averages of close.</p>
           <div className={`indicator${emaApplied ? " active" : ""}`}>
-            <p className="hint">Fast EMA {emaDraft.fast} · Slow EMA {emaDraft.slow}</p>
-            <p className="hint">
-              Long: close 1.5+ above slow, or 3+ above slow · Short: close 1.5+ below fast, or 3+ below slow
-            </p>
-            <p className="indicator-sub">Fast</p>
-            <label>
+            <div className="indicator-sub-row">
+              <p className="indicator-sub">Fast</p>
+            </div>
+            <label title="Lookback window in bars">
               Length
               <input
                 type="range"
-                min={EMA_LENGTH_MIN}
-                max={EMA_LENGTH_MAX}
+                min={sliderMin(EMA_LENGTH_MIN, emaDraft.fast)}
+                max={sliderMax(EMA_LENGTH_MAX, emaDraft.fast)}
                 value={emaDraft.fast}
                 disabled={locked}
                 onChange={(e) => setEmaDraft({ ...emaDraft, fast: Number(e.target.value) })}
               />
               <input
                 type="number"
-                min={EMA_LENGTH_MIN}
-                max={EMA_LENGTH_MAX}
+                min={1}
                 value={emaDraft.fast}
                 disabled={locked}
                 onChange={(e) => setEmaDraft({ ...emaDraft, fast: Number(e.target.value) })}
               />
             </label>
-            <p className="indicator-sub">Slow</p>
-            <label>
+            <div className="indicator-sub-row">
+              <p className="indicator-sub">Slow</p>
+            </div>
+            <label title="Lookback window in bars">
               Length
               <input
                 type="range"
-                min={EMA_LENGTH_MIN}
-                max={EMA_LENGTH_MAX}
+                min={sliderMin(EMA_LENGTH_MIN, emaDraft.slow)}
+                max={sliderMax(EMA_LENGTH_MAX, emaDraft.slow)}
                 value={emaDraft.slow}
                 disabled={locked}
                 onChange={(e) => setEmaDraft({ ...emaDraft, slow: Number(e.target.value) })}
               />
               <input
                 type="number"
-                min={EMA_LENGTH_MIN}
-                max={EMA_LENGTH_MAX}
+                min={1}
                 value={emaDraft.slow}
                 disabled={locked}
                 onChange={(e) => setEmaDraft({ ...emaDraft, slow: Number(e.target.value) })}
               />
             </label>
-            {!emaPairOk && (
-              <p className="hint warn">Invalid pair: both lengths ≤ 100 and fast must be less than slow</p>
-            )}
-          </div>
+          {optimizeEmaThresholds && (
+            <DualMaThresholdInputs
+              value={emaThresholds}
+              disabled={locked || busy || emaOptimizing}
+              onChange={setEmaThresholds}
+            />
+          )}
+          <DualMaSignalRules thresholds={emaThresholds} useThresholds={optimizeEmaThresholds} />
+        </div>
           <button
             type="button"
             className="optimize apply-config"
-            disabled={locked || !emaPairOk || !symbol || !effectiveTf || busy || emaOptimizing}
+            disabled={locked || !emaUsable || !symbol || !effectiveTf || busy || emaOptimizing}
             onClick={applyEmaConfiguration}
           >
             Apply to Chart
@@ -1446,11 +1758,9 @@ export default function App() {
         </section>
         <section className="gma-optimizer">
           <h2>Optimize</h2>
-          <p className="hint">
-            Grid-search fast and slow EMA lengths (1–100, fast &lt; slow)
-          </p>
-          <label className="optimizer-feature">
-            Feature
+          <EmaOptimizeBounds />
+          <label className="optimizer-feature" title="What the search maximizes">
+            Maximize
             <select
               value={emaOptimizationFeature}
               disabled={locked || busy || emaOptimizing || !symbol || !effectiveTf}
@@ -1467,7 +1777,7 @@ export default function App() {
             </select>
           </label>
           <div className="trade-filter">
-            <label>
+            <label title="Skip pairs with fewer closed trades than this">
               Min trades
               <input
                 type="number"
@@ -1477,7 +1787,7 @@ export default function App() {
                 onChange={(e) => setMinTrades(Math.max(1, Number(e.target.value) || 1))}
               />
             </label>
-            <label>
+            <label title="Optional cap on closed trades. Leave empty for no limit">
               Max trades
               <input
                 type="number"
@@ -1492,6 +1802,30 @@ export default function App() {
               />
             </label>
           </div>
+          <div className="optimizer-indicators">
+            <label className="indicator-toggle">
+              <input
+                type="checkbox"
+                checked={optimizeEmaThresholds}
+                disabled={locked || emaOptimizing}
+                onChange={(event) => {
+                  setOptimizeEmaThresholds(event.target.checked);
+                  setEmaOptimizationResult(null);
+                }}
+              />
+              Optimize thresholds
+            </label>
+          </div>
+          {!optimizeEmaThresholds && (
+            <p className="hint">
+              Scores EMA pairs from fast/slow crossovers only.
+            </p>
+          )}
+          {optimizeEmaThresholds && (
+            <p className="hint">
+              After the best EMA pair, also searches from-MA and from-close distances in {MA_THRESHOLD_STEP} steps ({MA_THRESHOLD_MIN}–{MA_THRESHOLD_MAX}).
+            </p>
+          )}
           <div className="optimizer-actions">
             <button
               type="button"
@@ -1526,11 +1860,19 @@ export default function App() {
               <dl className="optimizer-params">
                 <div>
                   <dt>Fast EMA</dt>
-                  <dd>L {emaOptimizationResult.params.fast_length}</dd>
+                  <dd>Length {emaOptimizationResult.params.fast_length}</dd>
                 </div>
                 <div>
                   <dt>Slow EMA</dt>
-                  <dd>L {emaOptimizationResult.params.slow_length}</dd>
+                  <dd>Length {emaOptimizationResult.params.slow_length}</dd>
+                </div>
+                <div>
+                  <dt>From MA</dt>
+                  <dd>{formatThreshold(emaOptimizationResult.params.ma_spread)}</dd>
+                </div>
+                <div>
+                  <dt>From close</dt>
+                  <dd>{formatThreshold(emaOptimizationResult.params.close_min)}</dd>
                 </div>
               </dl>
               <button
@@ -1548,7 +1890,7 @@ export default function App() {
           stats={emaTradeStats}
           last={last}
           bars={bars}
-          warmupBars={emaWarmupBars(emaDraft.fast, emaDraft.slow)}
+          warmupBars={emaWarmupBars(emaParams.fast, emaParams.slow)}
         />
         <section className="timezone">
           <h2>Timezone</h2>
@@ -1566,24 +1908,22 @@ export default function App() {
         <>
         <section className="gma-macd-config indicators">
           <h2>GMA MACD</h2>
+          <p className="config-lede">
+            MACD is fast GMA minus slow GMA of close. Signal is a GMA of that line. Histogram is MACD minus signal.
+          </p>
           <div className={`indicator${gmaMacdApplied ? " active" : ""}`}>
-            <p className="hint">
-              MACD line: {gmaMacdDraft.fastLength}-period GMA − {gmaMacdDraft.slowLength}-period GMA (on close)
-            </p>
-            <p className="hint">
-              Signal: {gmaMacdDraft.signalLength}-period GMA of MACD line · Histogram: MACD − Signal
-            </p>
-            <p className="hint">
-              F L/σ {gmaMacdFastScaleVal.toFixed(2)} · S L/σ {gmaMacdSlowScaleVal.toFixed(2)}
-            </p>
-            <p className="hint">Long: histogram &gt; 0 · Short: histogram &lt; 0</p>
-            <p className="indicator-sub">Fast GMA</p>
-            <label>
+            <div className="indicator-sub-row">
+              <p className="indicator-sub">Fast GMA</p>
+              <span className="param-meta" title="Length ÷ sigma">
+                L/σ {formatScale(gmaMacdDraft.fastLength, gmaMacdDraft.fastSigma)}
+              </span>
+            </div>
+            <label title="Lookback window in bars">
               Length
               <input
                 type="range"
-                min={GMA_MACD_LENGTH_MIN}
-                max={GMA_MACD_LENGTH_MAX}
+                min={sliderMin(GMA_MACD_LENGTH_MIN, gmaMacdDraft.fastLength)}
+                max={sliderMax(GMA_MACD_LENGTH_MAX, gmaMacdDraft.fastLength)}
                 value={gmaMacdDraft.fastLength}
                 disabled={locked}
                 onChange={(e) =>
@@ -1592,8 +1932,7 @@ export default function App() {
               />
               <input
                 type="number"
-                min={GMA_MACD_LENGTH_MIN}
-                max={GMA_MACD_LENGTH_MAX}
+                min={1}
                 value={gmaMacdDraft.fastLength}
                 disabled={locked}
                 onChange={(e) =>
@@ -1601,12 +1940,12 @@ export default function App() {
                 }
               />
             </label>
-            <label>
+            <label title="Gaussian width. Higher is smoother and lowers L/σ">
               Sigma
               <input
                 type="range"
-                min={GMA_MACD_SIGMA_MIN}
-                max={GMA_MACD_SIGMA_MAX}
+                min={sliderMin(GMA_MACD_SIGMA_MIN, gmaMacdDraft.fastSigma)}
+                max={sliderMax(GMA_MACD_SIGMA_MAX, gmaMacdDraft.fastSigma)}
                 value={gmaMacdDraft.fastSigma}
                 disabled={locked}
                 onChange={(e) =>
@@ -1615,8 +1954,8 @@ export default function App() {
               />
               <input
                 type="number"
-                min={GMA_MACD_SIGMA_MIN}
-                max={GMA_MACD_SIGMA_MAX}
+                min={0.01}
+                step="any"
                 value={gmaMacdDraft.fastSigma}
                 disabled={locked}
                 onChange={(e) =>
@@ -1624,13 +1963,18 @@ export default function App() {
                 }
               />
             </label>
-            <p className="indicator-sub">Slow GMA</p>
-            <label>
+            <div className="indicator-sub-row">
+              <p className="indicator-sub">Slow GMA</p>
+              <span className="param-meta" title="Length ÷ sigma">
+                L/σ {formatScale(gmaMacdDraft.slowLength, gmaMacdDraft.slowSigma)}
+              </span>
+            </div>
+            <label title="Lookback window in bars">
               Length
               <input
                 type="range"
-                min={GMA_MACD_LENGTH_MIN}
-                max={GMA_MACD_LENGTH_MAX}
+                min={sliderMin(GMA_MACD_LENGTH_MIN, gmaMacdDraft.slowLength)}
+                max={sliderMax(GMA_MACD_LENGTH_MAX, gmaMacdDraft.slowLength)}
                 value={gmaMacdDraft.slowLength}
                 disabled={locked}
                 onChange={(e) =>
@@ -1639,8 +1983,7 @@ export default function App() {
               />
               <input
                 type="number"
-                min={GMA_MACD_LENGTH_MIN}
-                max={GMA_MACD_LENGTH_MAX}
+                min={1}
                 value={gmaMacdDraft.slowLength}
                 disabled={locked}
                 onChange={(e) =>
@@ -1648,12 +1991,12 @@ export default function App() {
                 }
               />
             </label>
-            <label>
+            <label title="Gaussian width. Higher is smoother and lowers L/σ">
               Sigma
               <input
                 type="range"
-                min={GMA_MACD_SIGMA_MIN}
-                max={GMA_MACD_SIGMA_MAX}
+                min={sliderMin(GMA_MACD_SIGMA_MIN, gmaMacdDraft.slowSigma)}
+                max={sliderMax(GMA_MACD_SIGMA_MAX, gmaMacdDraft.slowSigma)}
                 value={gmaMacdDraft.slowSigma}
                 disabled={locked}
                 onChange={(e) =>
@@ -1662,8 +2005,8 @@ export default function App() {
               />
               <input
                 type="number"
-                min={GMA_MACD_SIGMA_MIN}
-                max={GMA_MACD_SIGMA_MAX}
+                min={0.01}
+                step="any"
                 value={gmaMacdDraft.slowSigma}
                 disabled={locked}
                 onChange={(e) =>
@@ -1671,13 +2014,18 @@ export default function App() {
                 }
               />
             </label>
-            <p className="indicator-sub">Signal GMA</p>
-            <label>
+            <div className="indicator-sub-row">
+              <p className="indicator-sub">Signal GMA</p>
+              <span className="param-meta" title="Length ÷ sigma">
+                L/σ {formatScale(gmaMacdDraft.signalLength, gmaMacdDraft.signalSigma)}
+              </span>
+            </div>
+            <label title="Lookback window in bars">
               Length
               <input
                 type="range"
-                min={GMA_MACD_LENGTH_MIN}
-                max={GMA_MACD_SIGNAL_LENGTH_MAX}
+                min={sliderMin(GMA_MACD_LENGTH_MIN, gmaMacdDraft.signalLength)}
+                max={sliderMax(GMA_MACD_SIGNAL_LENGTH_MAX, gmaMacdDraft.signalLength)}
                 value={gmaMacdDraft.signalLength}
                 disabled={locked}
                 onChange={(e) =>
@@ -1686,8 +2034,7 @@ export default function App() {
               />
               <input
                 type="number"
-                min={GMA_MACD_LENGTH_MIN}
-                max={GMA_MACD_SIGNAL_LENGTH_MAX}
+                min={1}
                 value={gmaMacdDraft.signalLength}
                 disabled={locked}
                 onChange={(e) =>
@@ -1695,12 +2042,12 @@ export default function App() {
                 }
               />
             </label>
-            <label>
+            <label title="Gaussian width. Higher is smoother and lowers L/σ">
               Sigma
               <input
                 type="range"
-                min={GMA_MACD_SIGMA_MIN}
-                max={GMA_MACD_SIGMA_MAX}
+                min={sliderMin(GMA_MACD_SIGMA_MIN, gmaMacdDraft.signalSigma)}
+                max={sliderMax(GMA_MACD_SIGMA_MAX, gmaMacdDraft.signalSigma)}
                 value={gmaMacdDraft.signalSigma}
                 disabled={locked}
                 onChange={(e) =>
@@ -1709,8 +2056,8 @@ export default function App() {
               />
               <input
                 type="number"
-                min={GMA_MACD_SIGMA_MIN}
-                max={GMA_MACD_SIGMA_MAX}
+                min={0.01}
+                step="any"
                 value={gmaMacdDraft.signalSigma}
                 disabled={locked}
                 onChange={(e) =>
@@ -1718,16 +2065,25 @@ export default function App() {
                 }
               />
             </label>
-            {!gmaMacdConfigOk && (
-              <p className="hint warn">
-                Invalid config: fast L/σ &lt; slow L/σ, lengths ≤ 100, signal ≤ 15, all L/σ ≤ 3
-              </p>
-            )}
           </div>
+          <dl className="config-rules">
+            <div>
+              <dt className="long">Long</dt>
+              <dd>Histogram crosses above zero</dd>
+            </div>
+            <div>
+              <dt className="short">Short</dt>
+              <dd>Histogram crosses below zero</dd>
+            </div>
+            <div>
+              <dt>Exit</dt>
+              <dd>Histogram crosses back through zero</dd>
+            </div>
+          </dl>
           <button
             type="button"
             className="optimize apply-config"
-            disabled={locked || !gmaMacdConfigOk || !symbol || !effectiveTf || busy || gmaMacdOptimizing}
+            disabled={locked || !gmaMacdUsable || !symbol || !effectiveTf || busy || gmaMacdOptimizing}
             onClick={applyGmaMacdConfiguration}
           >
             Apply to Chart
@@ -1735,11 +2091,9 @@ export default function App() {
         </section>
         <section className="gma-macd-optimizer gma-optimizer">
           <h2>Optimize</h2>
-          <p className="hint">
-            Grid-search fast, slow, and signal GMA pairs (L/σ ≤ 3, fast L/σ &lt; slow L/σ)
-          </p>
-          <label className="optimizer-feature">
-            Feature
+          <GmaMacdOptimizeBounds />
+          <label className="optimizer-feature" title="What the search maximizes">
+            Maximize
             <select
               value={gmaMacdOptimizationFeature}
               disabled={locked || busy || gmaMacdOptimizing || !symbol || !effectiveTf}
@@ -1756,7 +2110,7 @@ export default function App() {
             </select>
           </label>
           <div className="trade-filter">
-            <label>
+            <label title="Skip pairs with fewer closed trades than this">
               Min trades
               <input
                 type="number"
@@ -1766,7 +2120,7 @@ export default function App() {
                 onChange={(e) => setMinTrades(Math.max(1, Number(e.target.value) || 1))}
               />
             </label>
-            <label>
+            <label title="Optional cap on closed trades. Leave empty for no limit">
               Max trades
               <input
                 type="number"
@@ -1816,21 +2170,21 @@ export default function App() {
                 <div>
                   <dt>Fast GMA</dt>
                   <dd>
-                    L {gmaMacdOptimizationResult.params.fast_length} · σ{" "}
+                    Length {gmaMacdOptimizationResult.params.fast_length} · sigma{" "}
                     {gmaMacdOptimizationResult.params.fast_sigma}
                   </dd>
                 </div>
                 <div>
                   <dt>Slow GMA</dt>
                   <dd>
-                    L {gmaMacdOptimizationResult.params.slow_length} · σ{" "}
+                    Length {gmaMacdOptimizationResult.params.slow_length} · sigma{" "}
                     {gmaMacdOptimizationResult.params.slow_sigma}
                   </dd>
                 </div>
                 <div>
                   <dt>Signal GMA</dt>
                   <dd>
-                    L {gmaMacdOptimizationResult.params.signal_length} · σ{" "}
+                    Length {gmaMacdOptimizationResult.params.signal_length} · sigma{" "}
                     {gmaMacdOptimizationResult.params.signal_sigma}
                   </dd>
                 </div>
@@ -1851,9 +2205,9 @@ export default function App() {
           last={last}
           bars={bars}
           warmupBars={Math.max(
-            gmaMacdDraft.fastLength,
-            gmaMacdDraft.slowLength,
-            gmaMacdDraft.signalLength,
+            gmaMacdParams.fastLength,
+            gmaMacdParams.slowLength,
+            gmaMacdParams.signalLength,
           )}
         />
         <section className="timezone">
@@ -1978,6 +2332,10 @@ export default function App() {
                 Slow L {crossTfResult.params.slow_length} · σ{" "}
                 {crossTfResult.params.slow_sigma.toFixed(1)}
               </span>
+              <span>
+                MA {formatThreshold(crossTfResult.params.ma_spread)} · close{" "}
+                {formatThreshold(crossTfResult.params.close_min)}
+              </span>
               <button
                 type="button"
                 className="optimize"
@@ -1999,8 +2357,9 @@ export default function App() {
             showEma={emaApplied}
             showGmaMacd={gmaMacdApplied}
             showSignals={configActive}
-            emaParams={emaDraft}
-            gmaMacdParams={gmaMacdDraft}
+            emaParams={emaParams}
+            gmaParams={params}
+            gmaMacdParams={gmaMacdParams}
             selectionMode={manualMode}
             entryPoints={entryPoints}
             exitPoints={exitPoints}
